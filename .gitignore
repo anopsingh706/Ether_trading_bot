@@ -1,0 +1,18 @@
+# ── Secrets — NEVER commit (live wallet key, exchange + DB credentials) ──
+.env
+**/.env
+._.env
+**/._.env
+
+# ── Dependencies — regenerate with `npm install` ──
+node_modules/
+**/node_modules/
+
+# ── Old platform admin UI (not part of the trading bot) ──
+frontend/
+
+# ── Logs / OS junk ──
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
