@@ -19,8 +19,11 @@ const execution = require('./execution');
 const logger = require('./logger');
 
 class StrategyEngine {
-  constructor(feed) {
+  constructor(feed, volumeFeed = null) {
     this.feed = feed;
+    this.volume = volumeFeed;   // Binance volume source for the false-breakout filter
+    this._lastVolLog = 0;
+    this.lastVolume = null;      // last volume check (exposed for the status line)
     this.state = null;
     this.busy = false;    // in-memory re-entrancy guard while a swap is in flight
     this.halted = false;  // set if SLIPPAGE_HALT trips on a bad fill
@@ -127,6 +130,29 @@ class StrategyEngine {
     return null;
   }
 
+  // Volume confirmation gate for BUYS. Returns true if the buy is blocked (low volume
+  // = likely fake breakout). Instant check (no chase) against the Binance volume MA.
+  _volumeBlocksBuy() {
+    if (!cfg.VOLUME_FILTER || !this.volume) return false;
+    const v = this.volume.check(cfg.VOLUME_MULT);
+    this.lastVolume = v;
+    if (!v.active) { // warming up → don't gate yet
+      const now = Date.now();
+      if (now - this._lastVolLog > 60000) {
+        this._lastVolLog = now;
+        logger.note(`Volume filter warming up (${v.n}/${cfg.VOLUME_WINDOW} candles) — not gating yet`);
+      }
+      return false;
+    }
+    if (v.ok) return false; // enough volume behind the move → allow
+    const now = Date.now();
+    if (now - this._lastVolLog > 30000) {
+      this._lastVolLog = now;
+      logger.note(`Buy skipped: low volume ${v.recent.toFixed(0)} < ${cfg.VOLUME_MULT}× avg ${v.ma.toFixed(0)} ${cfg.VOLUME_SYMBOL.toUpperCase()}/${cfg.VOLUME_INTERVAL} — likely a fake breakout`);
+    }
+    return true;
+  }
+
   // Trend filter gate for BUYS (throttled log). Returns true if a buy is blocked.
   _trendBlocksBuy(price, trend) {
     if (!cfg.TREND_FILTER || (trend.ready && trend.up)) return false;
@@ -175,6 +201,7 @@ class StrategyEngine {
           this._pendingEntry = null; // held the full window → real breakout
         }
         if (this._trendBlocksBuy(price, trend)) return;
+        if (this._volumeBlocksBuy()) return; // false-breakout filter (volume confirmation)
         await this._act('BUY', p);
       } else if (this._pendingEntry) {
         // Fell back below the trigger before confirming → it was a fake spike.

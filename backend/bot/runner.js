@@ -9,6 +9,7 @@ const botConn = require('./db');
 const PriceFeed = require('./priceFeed');
 const UniswapFeed = require('./uniswapFeed');
 const StrategyEngine = require('./strategyEngine');
+const VolumeFeed = require('./volumeFeed');
 const BotTick = require('./models/BotTick');
 const logger = require('./logger');
 
@@ -26,12 +27,14 @@ async function main() {
   console.log(`   trend flt : ${cfg.TREND_FILTER ? 'ON' : 'off'} — only buys in an uptrend (MA window ${Math.round(cfg.TREND_WINDOW_MS / 60000)}min)`);
   console.log(`   exits     : take-profit≥${cfg.MIN_NET_PROFIT} USDC | stop-loss ${cfg.STOP_LOSS_PCT > 0 ? cfg.STOP_LOSS_PCT + '%' : 'off'} | trend-exit ${cfg.TREND_EXIT ? 'on' : 'off'}`);
   console.log(`   filters   : fake-spike confirm ${cfg.ENTRY_CONFIRM_MS > 0 ? Math.round(cfg.ENTRY_CONFIRM_MS / 1000) + 's' : 'off'} | cooldown ${cfg.COOLDOWN_MS > 0 ? Math.round(cfg.COOLDOWN_MS / 1000) + 's' : 'off'} | feed read ≤1/${Math.round(cfg.FEED_MIN_READ_MS / 1000)}s`);
+  console.log(`   volume    : ${cfg.VOLUME_FILTER ? 'confirm ON — buy only if ' + cfg.VOLUME_SYMBOL.toUpperCase() + ' ' + cfg.VOLUME_INTERVAL + ' vol ≥ ' + cfg.VOLUME_MULT + '× ' + cfg.VOLUME_WINDOW + '-MA' : 'off'}`);
   console.log(`   db        : ${botConn.name}`);
   console.log(`   price src : ${cfg.PRICE_SOURCE === 'uniswap' ? 'Uniswap v3 pool (Polygon, on-chain)' : 'Binance ' + cfg.WS_SYMBOL}`);
   console.log('────────────────────────────────────────────────────────────');
 
   const feed = cfg.PRICE_SOURCE === 'uniswap' ? new UniswapFeed() : new PriceFeed();
-  const engine = new StrategyEngine(feed);
+  const volumeFeed = cfg.VOLUME_FILTER ? new VolumeFeed() : null;
+  const engine = new StrategyEngine(feed, volumeFeed);
   await engine.init();
   logger.tradeTableHeader();
 
@@ -45,6 +48,7 @@ async function main() {
   });
 
   await feed.start();
+  if (volumeFeed) volumeFeed.start();
 
   // live status: a single in-place line at the bottom (TTY), or a sparse line
   // every ~60s when output is redirected to a file. Never adds table rows.
@@ -79,9 +83,16 @@ async function main() {
 
     const tr = engine.lastTrend || {};
     const trendStr = !tr.ready ? 'warming' : (tr.up ? 'up' : 'down');
+    let volStr = '';
+    if (volumeFeed) {
+      const vc = volumeFeed.check(cfg.VOLUME_MULT);
+      volStr = !vc.active
+        ? ` | vol warm(${vc.n}/${cfg.VOLUME_WINDOW})`
+        : ` | vol ${vc.ma > 0 ? (vc.recent / vc.ma).toFixed(1) + '×' : 'n/a'}${vc.ok ? '✓' : '✗'}`;
+    }
     const line =
       `⏳ ${holding ? 'HOLDING' : 'WAITING'} | last ${fmt(feed.lastPrice)}${cfg.SMOOTHING && engine.ema != null ? ' ema ' + fmt(engine.ema) : ''} | ` +
-      `${holding ? 'peak' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''} | next ${next}${stopStr} | ` +
+      `${holding ? 'peak' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''} | next ${next}${stopStr}${volStr} | ` +
       `${holding ? 'unreal ' + signed(unreal) : 'flat'} | ` +
       `RT ${s.roundTrips || 0} W${s.wins || 0}/L${s.losses || 0} | PnL ${signed(s.cumulativePnl || 0)} | ` +
       `${ticks}t/5s${feed.isStale() ? ' ⚠️STALE' : ''}`;
@@ -105,6 +116,7 @@ async function main() {
     });
     console.log('🛑 Shutting down…');
     feed.stop();
+    if (volumeFeed) volumeFeed.stop();
     try { await botConn.close(); } catch (_) {}
     process.exit(0);
   };

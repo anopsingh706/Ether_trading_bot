@@ -63,6 +63,16 @@ module.exports = {
   // and is skipped. 0 = buy immediately (old behaviour).
   ENTRY_CONFIRM_MS: num(process.env.BOT_ENTRY_CONFIRM_MS, 45000),
 
+  // Volume confirmation (false-breakout filter). Only BUY if the latest Binance candle's
+  // volume ≥ MULT × the trailing WINDOW-period volume MA. Instant gate (no chase). Source
+  // is a Binance kline WebSocket (no RPC load). Inactive until MIN_SAMPLES candles seen.
+  VOLUME_FILTER:      bool(process.env.BOT_VOLUME_FILTER, true),
+  VOLUME_MULT:        num(process.env.BOT_VOLUME_MULT, 1.5),
+  VOLUME_WINDOW:      num(process.env.BOT_VOLUME_WINDOW, 20),
+  VOLUME_MIN_SAMPLES: num(process.env.BOT_VOLUME_MIN_SAMPLES, 5),
+  VOLUME_SYMBOL:      (process.env.BOT_VOLUME_SYMBOL || 'ethusdt').toLowerCase(),
+  VOLUME_INTERVAL:    (process.env.BOT_VOLUME_INTERVAL || '1m'),
+
   // ── Trend filter (Option B: "sit in cash" — only BUY in an uptrend) ──────────
   TREND_FILTER:      bool(process.env.BOT_TREND_FILTER, true),         // on = block buys while price is below its moving average
   TREND_WINDOW_MS:   num(process.env.BOT_TREND_WINDOW_MS, 900000),     // moving-average window (default 15 min)
