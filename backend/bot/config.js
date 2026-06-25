@@ -78,6 +78,15 @@ module.exports = {
   TREND_WINDOW_MS:   num(process.env.BOT_TREND_WINDOW_MS, 900000),     // moving-average window (default 15 min)
   TREND_MIN_SAMPLES: num(process.env.BOT_TREND_MIN_SAMPLES, 20),       // warm-up ticks before the filter acts
 
+  // ── Regime / chop filter (anti-whipsaw) ──────────────────────────────────────
+  // Whipsaw = trading a ranging market. This gate only allows BUYS when the trend MA
+  // is actually SLOPING UP by ≥ MIN_SLOPE_PCT across the trend window — so the bot
+  // stands aside in flat/choppy markets (where the Δ-reversal just churns to the fee
+  // floor) and only commits when a real directional move is underway. THE structural
+  // whipsaw fix: not a tighter threshold, but "don't trade chop at all".
+  REGIME_FILTER:        bool(process.env.BOT_REGIME_FILTER, false),
+  REGIME_MIN_SLOPE_PCT: num(process.env.BOT_REGIME_MIN_SLOPE_PCT, 0.2), // min MA drift % over the window to call it a trend
+
   // ── Protective exits (cut a long instead of bag-holding) ─────────────────────
   // These OVERRIDE the MIN_NET_PROFIT guard below, so a losing/fading position is
   // always cut rather than held through a downtrend (the exact trap that forced a
@@ -115,6 +124,7 @@ module.exports = {
   USE_WSS:  bool(process.env.BOT_USE_WSS, true),               // subscribe to new blocks over WSS
   BLOCK_POLL_MS:    num(process.env.BOT_BLOCK_POLL_MS, 2500),     // reliable polling baseline (ms)
   FEED_MIN_READ_MS: num(process.env.BOT_FEED_MIN_READ_MS, 4000),  // hard cap on pool-read rate → cuts Infura RPC load
+  RPC_BACKOFF_MS:   num(process.env.BOT_RPC_BACKOFF_MS, 30000),   // pause trading this long after an RPC error (anti-spam)
   POOL_FEE: num(process.env.BOT_POOL_FEE, 500),               // 0.05% tier (auto-falls back if illiquid)
   UNISWAP_V3_FACTORY: trim(process.env.UNISWAP_V3_FACTORY) || '0x1F98431c8aD98523631AE4a59f267346ea31F984',
   UNISWAP_ROUTER:     trim(process.env.UNISWAP_ROUTER)     || '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45', // SwapRouter02 (live, next phase)

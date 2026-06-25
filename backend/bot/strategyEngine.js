@@ -24,16 +24,19 @@ class StrategyEngine {
     this.volume = volumeFeed;   // Binance volume source for the false-breakout filter
     this._lastVolLog = 0;
     this.lastVolume = null;      // last volume check (exposed for the status line)
+    this._errBackoffUntil = 0;   // pause-until timestamp after an RPC error (anti-spam)
+    this._lastErrLog = 0;
     this.state = null;
     this.busy = false;    // in-memory re-entrancy guard while a swap is in flight
     this.halted = false;  // set if SLIPPAGE_HALT trips on a bad fill
     this._lastGuardLog = 0;
     this._lastTrendLog = 0;
+    this._lastRegimeLog = 0;
     this._lastExitLog = 0;
     this.ema = null;        // #1: smoothed decision price (EMA); null until first tick
     this._emaTs = 0;
     this.priceHist = [];                                    // rolling {p, ts} for the trend MA
-    this.lastTrend = { ready: false, ma: null, up: false }; // exposed for the status line
+    this.lastTrend = { ready: false, ma: null, up: false, slopePct: 0, regime: 'chop', regimeReady: false }; // exposed for the status line
     this._pendingEntry = null;                              // a breakout being confirmed (anti fake-spike)
   }
 
@@ -91,17 +94,49 @@ class StrategyEngine {
     return false;
   }
 
-  // Option B trend filter: rolling moving average; "uptrend" = price at/above the MA.
+  // Option B trend filter + regime slope: rolling moving average ("uptrend" = price
+  // at/above the MA) plus a SLOPE that measures whether the market is actually trending
+  // vs ranging — the input to the anti-whipsaw regime gate.
   _updateTrend(price) {
     const ts = Date.now();
     this.priceHist.push({ p: price, ts });
     const cutoff = ts - cfg.TREND_WINDOW_MS;
     while (this.priceHist.length && this.priceHist[0].ts < cutoff) this.priceHist.shift();
     const n = this.priceHist.length;
-    if (n === 0) { this.lastTrend = { ready: false, ma: null, up: false }; return this.lastTrend; }
+    if (n === 0) { this.lastTrend = { ready: false, ma: null, up: false, slopePct: 0, regime: 'chop', regimeReady: false }; return this.lastTrend; }
     const ma = this.priceHist.reduce((sum, x) => sum + x.p, 0) / n;
-    this.lastTrend = { ready: n >= cfg.TREND_MIN_SAMPLES, ma, up: price >= ma };
+
+    // Trend SLOPE: mean of the window's first half vs its second half. Averaging both
+    // ends makes it robust to single-tick noise (unlike raw endpoint-to-endpoint). The
+    // window must also span ≥ half of TREND_WINDOW_MS before the slope is trustworthy.
+    const mid = Math.floor(n / 2);
+    const m1 = this.priceHist.slice(0, mid).reduce((s, x) => s + x.p, 0) / Math.max(mid, 1);
+    const m2 = this.priceHist.slice(mid).reduce((s, x) => s + x.p, 0) / Math.max(n - mid, 1);
+    const slopePct = m1 > 0 ? ((m2 - m1) / m1) * 100 : 0;
+    const spanMs = this.priceHist[n - 1].ts - this.priceHist[0].ts;
+    const regimeReady = n >= cfg.TREND_MIN_SAMPLES && spanMs >= cfg.TREND_WINDOW_MS * 0.5;
+    const thr = cfg.REGIME_MIN_SLOPE_PCT;
+    const regime = slopePct >= thr ? 'up' : slopePct <= -thr ? 'down' : 'chop';
+
+    this.lastTrend = { ready: n >= cfg.TREND_MIN_SAMPLES, ma, up: price >= ma, slopePct, regime, regimeReady };
     return this.lastTrend;
+  }
+
+  // Regime / chop gate for BUYS (anti-whipsaw, throttled log). Returns true if blocked.
+  // Only allows an entry when the trend is genuinely sloping UP — so the bot stays flat
+  // in ranging/choppy markets, where the Δ-reversal otherwise churns to the fee floor.
+  _regimeBlocksBuy() {
+    if (!cfg.REGIME_FILTER) return false;
+    const t = this.lastTrend;
+    if (t.regimeReady && t.regime === 'up') return false;
+    const now = Date.now();
+    if (now - this._lastRegimeLog > 30000) {
+      this._lastRegimeLog = now;
+      logger.note(!t.regimeReady
+        ? `Regime filter warming up (need ${cfg.TREND_MIN_SAMPLES} ticks + half-window of data) — staying in cash`
+        : `Regime: ${t.regime} (slope ${t.slopePct.toFixed(2)}% < +${cfg.REGIME_MIN_SLOPE_PCT}% over ${Math.round(cfg.TREND_WINDOW_MS / 60000)}min) — ranging, not a trend → staying in cash`);
+    }
+    return true;
   }
 
   // Protective exits, evaluated while IN_WETH. These OVERRIDE the profit guard so a
@@ -168,6 +203,7 @@ class StrategyEngine {
 
   async onTick({ price }) {
     if (!this.state || this.busy || this.halted) return;
+    if (Date.now() < this._errBackoffUntil) return; // backing off after an RPC error — don't hammer
     if (this.feed.isStale()) return; // never act on stale data
 
     const trend = this._updateTrend(price);   // trend MA on the RAW price (unchanged)
@@ -200,6 +236,7 @@ class StrategyEngine {
           if (Date.now() - this._pendingEntry.since < cfg.ENTRY_CONFIRM_MS) return; // still confirming
           this._pendingEntry = null; // held the full window → real breakout
         }
+        if (this._regimeBlocksBuy()) return;  // anti-whipsaw: only enter when actually trending
         if (this._trendBlocksBuy(price, trend)) return;
         if (this._volumeBlocksBuy()) return; // false-breakout filter (volume confirmation)
         await this._act('BUY', p);
@@ -262,7 +299,17 @@ class StrategyEngine {
         logger.warn('TRADING HALTED after a bad fill (SLIPPAGE_HALT). Restart the bot to resume.');
       }
     } catch (e) {
-      logger.warn('[engine] execution error: ' + (e.message || e));
+      const msg = (e && (e.message || String(e))) || '';
+      if (/Too Many Requests|missing response|BAD_DATA|SERVER_ERROR|TIMEOUT|ETIMEDOUT|ECONNRESET|503|429|could not detect network/i.test(msg)) {
+        // RPC rate-limit / network problem → back off so we don't spam the provider every tick.
+        this._errBackoffUntil = Date.now() + cfg.RPC_BACKOFF_MS;
+        if (Date.now() - this._lastErrLog > 30000) {
+          this._lastErrLog = Date.now();
+          logger.warn(`RPC error — pausing ${Math.round(cfg.RPC_BACKOFF_MS / 1000)}s before retrying (check POLYGON_RPC_URL / provider quota).`);
+        }
+      } else {
+        logger.warn('[engine] execution error: ' + msg.slice(0, 180));
+      }
     } finally {
       await state.releaseLock();
       this.busy = false;

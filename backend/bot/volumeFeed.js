@@ -13,6 +13,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 const EventEmitter = require('events');
 const WebSocket = require('ws');
+const axios = require('axios');
 const cfg = require('./config');
 
 class VolumeFeed extends EventEmitter {
@@ -27,9 +28,27 @@ class VolumeFeed extends EventEmitter {
     this.lastClosedTs = 0;
   }
 
-  start() {
+  async start() {
     this.stopped = false;
+    await this.seed();   // prefill closed-candle history from REST → filter active immediately
     this._connect();
+  }
+
+  // Prefill closed-candle volumes from Binance REST so the filter isn't blind for the
+  // first VOLUME_MIN_SAMPLES candles after a restart (at 5m that was a 25-min window with
+  // NO volume protection — exactly the gap that let an unconfirmed buy through).
+  async seed() {
+    try {
+      const sym = cfg.VOLUME_SYMBOL.toUpperCase();
+      const url = `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${cfg.VOLUME_INTERVAL}&limit=${cfg.VOLUME_WINDOW + 1}`;
+      const r = await axios.get(url, { timeout: 8000 });
+      const vols = (r.data || []).map((k) => parseFloat(k[5])); // kline index 5 = base-asset volume
+      if (vols.length) { this.currentVolume = vols[vols.length - 1]; vols.pop(); } // drop the in-progress candle
+      this.closedVolumes = vols.slice(-(cfg.VOLUME_WINDOW + 1));
+      console.log(`📊 [volume] seeded ${this.closedVolumes.length} closed ${cfg.VOLUME_INTERVAL} candles from REST — filter active immediately`);
+    } catch (e) {
+      console.warn('⚠️ [volume] REST seed failed (will warm up live instead):', e.message);
+    }
   }
 
   stop() {
