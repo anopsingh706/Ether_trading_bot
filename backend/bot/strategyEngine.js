@@ -52,10 +52,21 @@ class StrategyEngine {
   // #3 — thresholds in price terms (absolute USD, or % of the anchor): a WIDER
   // entry confirmation and a TIGHTER trailing exit.
   _entryDelta(anchor) {
+    if (cfg.THRESHOLD_MODE === 'atr') return this._atrDelta(cfg.ENTRY_ATR_MULT, cfg.ENTRY_THRESHOLD);
     return cfg.THRESHOLD_MODE === 'percent' ? (anchor * cfg.ENTRY_THRESHOLD) / 100 : cfg.ENTRY_THRESHOLD;
   }
   _exitDelta(anchor) {
+    if (cfg.THRESHOLD_MODE === 'atr') return this._atrDelta(cfg.EXIT_ATR_MULT, cfg.EXIT_THRESHOLD);
     return cfg.THRESHOLD_MODE === 'percent' ? (anchor * cfg.EXIT_THRESHOLD) / 100 : cfg.EXIT_THRESHOLD;
+  }
+
+  // ATR-adaptive Δ = max(mult × ATR, fixed $ floor). Widens with volatility (anti-whipsaw),
+  // never tightens below the floor (anti-churn). Falls back to the floor until the ATR feed
+  // has enough candles — but it's REST-seeded, so that's effectively immediate.
+  _atrDelta(mult, floor) {
+    const atr = this.volume && typeof this.volume.atr === 'function' ? this.volume.atr() : null;
+    if (atr == null || !isFinite(atr) || atr <= 0) return floor;
+    return Math.max(mult * atr, floor);
   }
 
   // #1 — EMA-smoothed decision price. Time-based, so irregular tick spacing (WSS
@@ -239,6 +250,12 @@ class StrategyEngine {
         if (this._regimeBlocksBuy()) return;  // anti-whipsaw: only enter when actually trending
         if (this._trendBlocksBuy(price, trend)) return;
         if (this._volumeBlocksBuy()) return; // false-breakout filter (volume confirmation)
+        // All gates passed → log the EXACT values that allowed THIS entry. The throttled
+        // "chop" lines above can be up to 30s stale, so without this the log looks like the
+        // bot ignored its own filter. This is the real decision context at the buy tick.
+        const _atr = this.volume && typeof this.volume.atr === 'function' ? this.volume.atr() : null;
+        const _volR = this.lastVolume && this.lastVolume.ma ? (this.lastVolume.recent / this.lastVolume.ma).toFixed(1) + '×' : 'n/a';
+        logger.note(`✅ Entry confirmed @ ${p.toFixed(2)}: regime UP slope +${trend.slopePct != null ? trend.slopePct.toFixed(2) : '?'}% (≥${cfg.REGIME_MIN_SLOPE_PCT}%) | vol ${_volR} | ATR $${_atr ? _atr.toFixed(2) : 'n/a'} | entryΔ $${this._entryDelta(s.anchorPrice).toFixed(2)}`);
         await this._act('BUY', p);
       } else if (this._pendingEntry) {
         // Fell back below the trigger before confirming → it was a fake spike.

@@ -42,7 +42,7 @@ module.exports = {
 
   // ── Strategy ─────────────────────────────────────────────────────────────────
   THRESHOLD:       num(process.env.BOT_THRESHOLD, 0.05),               // legacy single Δ (fallback)
-  THRESHOLD_MODE:  (process.env.BOT_THRESHOLD_MODE || 'absolute'),     // 'absolute' | 'percent'
+  THRESHOLD_MODE:  (process.env.BOT_THRESHOLD_MODE || 'absolute'),     // 'absolute' | 'percent' | 'atr'
   TRADE_SIZE_MODE: (process.env.BOT_TRADE_SIZE_MODE || 'all'),         // 'all' (100%)
   COOLDOWN_MS:     num(process.env.BOT_COOLDOWN_MS, 0),                // min gap between trades
 
@@ -51,6 +51,16 @@ module.exports = {
   // until set. Recommended (percent): entry 0.3, exit 0.15.
   ENTRY_THRESHOLD: num(process.env.BOT_ENTRY_THRESHOLD, num(process.env.BOT_THRESHOLD, 0.05)),
   EXIT_THRESHOLD:  num(process.env.BOT_EXIT_THRESHOLD,  num(process.env.BOT_THRESHOLD, 0.05)),
+
+  // ── ATR-adaptive thresholds (THRESHOLD_MODE='atr') ───────────────────────────
+  // The proper fix for "too quiet here, too twitchy there": the threshold tracks live
+  // volatility. delta = max(MULT × ATR, fixed ENTRY/EXIT_THRESHOLD). So it AUTO-WIDENS
+  // when ETH is volatile (won't whipsaw) but never tightens below the $ floor (won't
+  // churn in dead-calm). ATR is Wilder ATR(period) over the Binance VOLUME_INTERVAL
+  // candle stream (same WS — no extra RPC), seeded from REST so it's live immediately.
+  ATR_PERIOD:     num(process.env.BOT_ATR_PERIOD, 14),
+  ENTRY_ATR_MULT: num(process.env.BOT_ENTRY_ATR_MULT, 1.0),
+  EXIT_ATR_MULT:  num(process.env.BOT_EXIT_ATR_MULT, 1.0),
 
   // #1 — Smoothed-price reversal: run the trough/peak reversal on an EMA of the
   // price, not raw ticks, so noise can't fake a reversal. SMOOTHING_MS = EMA

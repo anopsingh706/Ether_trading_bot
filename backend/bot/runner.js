@@ -21,7 +21,11 @@ async function main() {
   console.log('────────────────────────────────────────────────────────────');
   console.log('🤖 Trading bot starting');
   console.log('   mode      : ⚠️  LIVE (real funds) — every run trades real money');
-  console.log(`   entry/exit: buy +${cfg.ENTRY_THRESHOLD} / sell -${cfg.EXIT_THRESHOLD} (${cfg.THRESHOLD_MODE})`);
+  if (cfg.THRESHOLD_MODE === 'atr') {
+    console.log(`   entry/exit: ATR-adaptive — buy ${cfg.ENTRY_ATR_MULT}×ATR / sell ${cfg.EXIT_ATR_MULT}×ATR, floor $${cfg.ENTRY_THRESHOLD}/$${cfg.EXIT_THRESHOLD} (ATR${cfg.ATR_PERIOD} on ${cfg.VOLUME_INTERVAL})`);
+  } else {
+    console.log(`   entry/exit: buy +${cfg.ENTRY_THRESHOLD} / sell -${cfg.EXIT_THRESHOLD} (${cfg.THRESHOLD_MODE})`);
+  }
   console.log(`   smoothing : ${cfg.SMOOTHING ? 'EMA ~' + Math.round(cfg.SMOOTHING_MS / 1000) + 's (decisions on smoothed price)' : 'off (raw ticks)'}`);
   console.log(`   guards    : minNetProfit=${cfg.MIN_NET_PROFIT} USDC | slippageAlert=${cfg.SLIPPAGE_ALERT_BPS}bps${cfg.SLIPPAGE_HALT ? ' (HALT on)' : ''}`);
   console.log(`   trend flt : ${cfg.TREND_FILTER ? 'ON' : 'off'} — only buys in an uptrend (MA window ${Math.round(cfg.TREND_WINDOW_MS / 60000)}min)`);
@@ -34,7 +38,7 @@ async function main() {
   console.log('────────────────────────────────────────────────────────────');
 
   const feed = cfg.PRICE_SOURCE === 'uniswap' ? new UniswapFeed() : new PriceFeed();
-  const volumeFeed = cfg.VOLUME_FILTER ? new VolumeFeed() : null;
+  const volumeFeed = (cfg.VOLUME_FILTER || cfg.THRESHOLD_MODE === 'atr') ? new VolumeFeed() : null;
   const engine = new StrategyEngine(feed, volumeFeed);
   await engine.init();
   logger.tradeTableHeader();
@@ -63,9 +67,8 @@ async function main() {
     const ticks = feed.tickCount - lastTickCount;
     lastTickCount = feed.tickCount;
 
-    const pct = cfg.THRESHOLD_MODE === 'percent';
-    const entryDelta = s.anchorPrice != null ? (pct ? (s.anchorPrice * cfg.ENTRY_THRESHOLD) / 100 : cfg.ENTRY_THRESHOLD) : 0;
-    const exitDelta  = s.anchorPrice != null ? (pct ? (s.anchorPrice * cfg.EXIT_THRESHOLD)  / 100 : cfg.EXIT_THRESHOLD)  : 0;
+    const entryDelta = s.anchorPrice != null ? engine._entryDelta(s.anchorPrice) : 0;
+    const exitDelta  = s.anchorPrice != null ? engine._exitDelta(s.anchorPrice)  : 0;
 
     const holding = s.position === 'IN_WETH';
     let next = '—';
@@ -88,15 +91,20 @@ async function main() {
       ? ` reg ${tr.regimeReady ? tr.regime + (tr.slopePct != null ? '(' + (tr.slopePct >= 0 ? '+' : '') + tr.slopePct.toFixed(2) + '%)' : '') : 'warm'}`
       : '';
     let volStr = '';
-    if (volumeFeed) {
+    if (cfg.VOLUME_FILTER && volumeFeed) {
       const vc = volumeFeed.check(cfg.VOLUME_MULT);
       volStr = !vc.active
         ? ` | vol warm(${vc.n}/${cfg.VOLUME_WINDOW})`
         : ` | vol ${vc.ma > 0 ? (vc.recent / vc.ma).toFixed(1) + '×' : 'n/a'}${vc.ok ? '✓' : '✗'}`;
     }
+    let atrStr = '';
+    if (cfg.THRESHOLD_MODE === 'atr' && volumeFeed) {
+      const a = volumeFeed.atr();
+      atrStr = a ? ` | ATR ${fmt(a)} Δ${fmt(entryDelta)}/${fmt(exitDelta)}` : ' | ATR warm';
+    }
     const line =
       `⏳ ${holding ? 'HOLDING' : 'WAITING'} | last ${fmt(feed.lastPrice)}${cfg.SMOOTHING && engine.ema != null ? ' ema ' + fmt(engine.ema) : ''} | ` +
-      `${holding ? 'peak' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''}${regStr} | next ${next}${stopStr}${volStr} | ` +
+      `${holding ? 'peak' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''}${regStr} | next ${next}${stopStr}${volStr}${atrStr} | ` +
       `${holding ? 'unreal ' + signed(unreal) : 'flat'} | ` +
       `RT ${s.roundTrips || 0} W${s.wins || 0}/L${s.losses || 0} | PnL ${signed(s.cumulativePnl || 0)} | ` +
       `${ticks}t/5s${feed.isStale() ? ' ⚠️STALE' : ''}`;

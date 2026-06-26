@@ -25,6 +25,11 @@ class VolumeFeed extends EventEmitter {
     this.maxReconnectDelay = 30000;
     this.closedVolumes = [];   // last (WINDOW+1) CLOSED-candle base volumes (ETH)
     this.currentVolume = null; // in-progress candle volume (display only)
+    // Closed-candle OHLC for Wilder ATR (volatility) — same kline stream, no extra WS.
+    this.closedHighs = [];
+    this.closedLows = [];
+    this.closedCloses = [];
+    this.maxBars = Math.max(cfg.VOLUME_WINDOW + 1, cfg.ATR_PERIOD * 4 + 1); // keep enough for a stable ATR
     this.lastClosedTs = 0;
   }
 
@@ -40,15 +45,39 @@ class VolumeFeed extends EventEmitter {
   async seed() {
     try {
       const sym = cfg.VOLUME_SYMBOL.toUpperCase();
-      const url = `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${cfg.VOLUME_INTERVAL}&limit=${cfg.VOLUME_WINDOW + 1}`;
+      const limit = Math.max(cfg.VOLUME_WINDOW + 1, cfg.ATR_PERIOD * 4 + 1);
+      const url = `https://api.binance.com/api/v3/klines?symbol=${sym}&interval=${cfg.VOLUME_INTERVAL}&limit=${limit}`;
       const r = await axios.get(url, { timeout: 8000 });
-      const vols = (r.data || []).map((k) => parseFloat(k[5])); // kline index 5 = base-asset volume
-      if (vols.length) { this.currentVolume = vols[vols.length - 1]; vols.pop(); } // drop the in-progress candle
-      this.closedVolumes = vols.slice(-(cfg.VOLUME_WINDOW + 1));
-      console.log(`📊 [volume] seeded ${this.closedVolumes.length} closed ${cfg.VOLUME_INTERVAL} candles from REST — filter active immediately`);
+      const rows = r.data || []; // kline: [openTime, o, h, l, c, v, ...]
+      if (rows.length) {
+        this.currentVolume = parseFloat(rows[rows.length - 1][5]); // in-progress candle (display)
+        const closed = rows.slice(0, -1);                          // drop the in-progress candle
+        this.closedVolumes = closed.map((k) => parseFloat(k[5])).slice(-(cfg.VOLUME_WINDOW + 1));
+        this.closedHighs   = closed.map((k) => parseFloat(k[2])).slice(-this.maxBars);
+        this.closedLows    = closed.map((k) => parseFloat(k[3])).slice(-this.maxBars);
+        this.closedCloses  = closed.map((k) => parseFloat(k[4])).slice(-this.maxBars);
+      }
+      const a = this.atr();
+      console.log(`📊 [volume] seeded ${this.closedVolumes.length} vol + ${this.closedCloses.length} OHLC ${cfg.VOLUME_INTERVAL} candles from REST — filters active immediately${a ? ` (ATR $${a.toFixed(2)})` : ''}`);
     } catch (e) {
       console.warn('⚠️ [volume] REST seed failed (will warm up live instead):', e.message);
     }
+  }
+
+  // Wilder ATR(period) over the closed-candle OHLC ($). Returns null until enough candles.
+  atr(period = cfg.ATR_PERIOD) {
+    const H = this.closedHighs, L = this.closedLows, C = this.closedCloses;
+    const n = C.length;
+    if (n < period + 1) return null;
+    const TR = [];
+    for (let i = 1; i < n; i++) {
+      TR.push(Math.max(H[i] - L[i], Math.abs(H[i] - C[i - 1]), Math.abs(L[i] - C[i - 1])));
+    }
+    let atr = 0;
+    for (let i = 0; i < period; i++) atr += TR[i];   // seed = simple avg of first `period` TRs
+    atr /= period;
+    for (let i = period; i < TR.length; i++) atr = (atr * (period - 1) + TR[i]) / period; // Wilder smooth
+    return atr;
   }
 
   stop() {
@@ -70,8 +99,11 @@ class VolumeFeed extends EventEmitter {
         this.currentVolume = parseFloat(k.v); // in-progress candle volume
         if (k.x) {                              // candle CLOSED → record it
           this.closedVolumes.push(parseFloat(k.v));
-          const max = cfg.VOLUME_WINDOW + 1;
-          while (this.closedVolumes.length > max) this.closedVolumes.shift();
+          while (this.closedVolumes.length > cfg.VOLUME_WINDOW + 1) this.closedVolumes.shift();
+          this.closedHighs.push(parseFloat(k.h));
+          this.closedLows.push(parseFloat(k.l));
+          this.closedCloses.push(parseFloat(k.c));
+          while (this.closedCloses.length > this.maxBars) { this.closedHighs.shift(); this.closedLows.shift(); this.closedCloses.shift(); }
           this.lastClosedTs = Date.now();
         }
       } catch (_) { /* ignore malformed frame */ }
