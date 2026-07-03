@@ -20,20 +20,33 @@ async function main() {
 
   console.log('────────────────────────────────────────────────────────────');
   console.log('🤖 Trading bot starting');
-  console.log('   mode      : ⚠️  LIVE (real funds) — every run trades real money');
+  if (cfg.SIM_MODE) {
+    console.log(`   mode      : 🧪 SIMULATION (paper) — virtual $${cfg.SIM_CAPITAL} capital, NO real funds, no wallet`);
+    console.log(`   sim cost  : real QuoterV2 fill (0.05% LP fee + price impact) + live gas estimate per swap`);
+    console.log(`   sim target: ~${cfg.SIM_TX_TARGET} transactions${cfg.SIM_MAX_TX > 0 ? ` (hard stop at ${cfg.SIM_MAX_TX})` : ' (run until stopped)'}`);
+  } else {
+    console.log('   mode      : ⚠️  LIVE (real funds) — every run trades real money');
+  }
   console.log(`   entry/exit: buy +${cfg.ENTRY_THRESHOLD} / sell -${cfg.EXIT_THRESHOLD} (${cfg.THRESHOLD_MODE})`);
   console.log(`   smoothing : ${cfg.SMOOTHING ? 'EMA ~' + Math.round(cfg.SMOOTHING_MS / 1000) + 's (decisions on smoothed price)' : 'off (raw ticks)'}`);
   console.log(`   guards    : minNetProfit=${cfg.MIN_NET_PROFIT} USDC | slippageAlert=${cfg.SLIPPAGE_ALERT_BPS}bps${cfg.SLIPPAGE_HALT ? ' (HALT on)' : ''}`);
+  console.log(`   swap safe : minOut slip ${(cfg.SLIPPAGE_TOLERANCE * 100).toFixed(2)}%→${(cfg.SLIPPAGE_MAX * 100).toFixed(2)}% (ATR-adaptive ×${cfg.SLIPPAGE_ATR_MULT}) | revert backoff ${Math.round(cfg.REVERT_BACKOFF_MS / 1000)}s`);
   console.log(`   trend flt : ${cfg.TREND_FILTER ? 'ON' : 'off'} — only buys in an uptrend (MA window ${Math.round(cfg.TREND_WINDOW_MS / 60000)}min)`);
-  console.log(`   exits     : take-profit≥${cfg.MIN_NET_PROFIT} USDC | stop-loss ${cfg.STOP_LOSS_PCT > 0 ? cfg.STOP_LOSS_PCT + '%' : 'off'} | trend-exit ${cfg.TREND_EXIT ? 'on' : 'off'}`);
+  if (cfg.EXIT_MODE === 'breakeven') {
+    console.log(`   exits     : BREAK-EVEN mode — no loss exits (hold underwater for BE+${cfg.BE_BUFFER_PCT}%) | trail above BE | disaster stop ${cfg.DISASTER_STOP_PCT > 0 ? cfg.DISASTER_STOP_PCT + '%' : '⚠️ OFF (unbounded holds)'}`);
+  } else {
+    console.log(`   exits     : take-profit≥${cfg.MIN_NET_PROFIT} USDC | stop-loss ${cfg.STOP_LOSS_PCT > 0 ? cfg.STOP_LOSS_PCT + '%' : 'off'} | trend-exit ${cfg.TREND_EXIT ? 'on' : 'off'}`);
+  }
   console.log(`   filters   : fake-spike confirm ${cfg.ENTRY_CONFIRM_MS > 0 ? Math.round(cfg.ENTRY_CONFIRM_MS / 1000) + 's' : 'off'} | cooldown ${cfg.COOLDOWN_MS > 0 ? Math.round(cfg.COOLDOWN_MS / 1000) + 's' : 'off'} | feed read ≤1/${Math.round(cfg.FEED_MIN_READ_MS / 1000)}s`);
   console.log(`   volume    : ${cfg.VOLUME_FILTER ? 'confirm ON — buy only if ' + cfg.VOLUME_SYMBOL.toUpperCase() + ' ' + cfg.VOLUME_INTERVAL + ' vol ≥ ' + cfg.VOLUME_MULT + '× ' + cfg.VOLUME_WINDOW + '-MA' : 'off'}`);
+  console.log(`   atr filt  : ${cfg.ATR_FILTER ? 'ON — skip entries when ATR < ' + cfg.ATR_MIN_PCT + '% (period ' + cfg.ATR_PERIOD + ')' + (cfg.ATR_ENTRY_MULT > 0 ? ', adaptive Δ ×' + cfg.ATR_ENTRY_MULT : '') : 'off'}`);
   console.log(`   db        : ${botConn.name}`);
   console.log(`   price src : ${cfg.PRICE_SOURCE === 'uniswap' ? 'Uniswap v3 pool (Polygon, on-chain)' : 'Binance ' + cfg.WS_SYMBOL}`);
   console.log('────────────────────────────────────────────────────────────');
 
   const feed = cfg.PRICE_SOURCE === 'uniswap' ? new UniswapFeed() : new PriceFeed();
-  const volumeFeed = cfg.VOLUME_FILTER ? new VolumeFeed() : null;
+  // One Binance kline feed powers BOTH the volume filter and the ATR filter.
+  const volumeFeed = (cfg.VOLUME_FILTER || cfg.ATR_FILTER) ? new VolumeFeed() : null;
   const engine = new StrategyEngine(feed, volumeFeed);
   await engine.init();
   logger.tradeTableHeader();
@@ -71,9 +84,13 @@ async function main() {
     if (s.anchorPrice != null) {
       next = holding ? `SELL≤${fmt(s.anchorPrice - exitDelta)}` : `BUY≥${fmt(s.anchorPrice + entryDelta)}`;
     }
-    // show the protective stop level while holding (entry − STOP_LOSS_PCT%)
+    // show the exit levels while holding: BE floor (breakeven mode) or stop-loss (classic)
     let stopStr = '';
-    if (holding && s.entryPrice != null && cfg.STOP_LOSS_PCT > 0) {
+    if (holding && cfg.EXIT_MODE === 'breakeven' && engine.lastBE != null) {
+      const uw = s.anchorPrice != null && s.anchorPrice < engine.lastBE;
+      const uwh = uw && s.entryAt ? ' uw ' + ((Date.now() - new Date(s.entryAt).getTime()) / 3600000).toFixed(1) + 'h' : '';
+      stopStr = ` BE≥${fmt(engine.lastBE)}${uw ? '⏳' + uwh : '✓'}${cfg.DISASTER_STOP_PCT > 0 && s.entryPrice ? ' dstop≤' + fmt(s.entryPrice * (1 - cfg.DISASTER_STOP_PCT / 100)) : ''}`;
+    } else if (holding && s.entryPrice != null && cfg.STOP_LOSS_PCT > 0) {
       stopStr = ` stop≤${fmt(s.entryPrice * (1 - cfg.STOP_LOSS_PCT / 100))}`;
     }
     let unreal = null;
@@ -84,18 +101,37 @@ async function main() {
     const tr = engine.lastTrend || {};
     const trendStr = !tr.ready ? 'warming' : (tr.up ? 'up' : 'down');
     let volStr = '';
-    if (volumeFeed) {
+    if (volumeFeed && cfg.VOLUME_FILTER) {
       const vc = volumeFeed.check(cfg.VOLUME_MULT);
       volStr = !vc.active
         ? ` | vol warm(${vc.n}/${cfg.VOLUME_WINDOW})`
         : ` | vol ${vc.ma > 0 ? (vc.recent / vc.ma).toFixed(1) + '×' : 'n/a'}${vc.ok ? '✓' : '✗'}`;
     }
+    let atrStr = '';
+    if (volumeFeed && cfg.ATR_FILTER) {
+      const a = volumeFeed.atr();
+      atrStr = a.ready ? ` | atr ${a.atrPct.toFixed(2)}%${a.atrPct < cfg.ATR_MIN_PCT ? '✗' : '✓'}` : ' | atr warm';
+    }
+    // sim: show virtual equity (cash + WETH marked at the live price) and tx progress
+    let simStr = '';
+    if (cfg.SIM_MODE) {
+      const equity = (s.simUsdt || 0) + (s.simWeth || 0) * (feed.lastPrice || 0);
+      simStr = ` | 💰$${equity.toFixed(2)} (gas $${(s.simGasUsd || 0).toFixed(2)}) | tx ${s.txCount || 0}/${cfg.SIM_TX_TARGET}`;
+    }
     const line =
       `⏳ ${holding ? 'HOLDING' : 'WAITING'} | last ${fmt(feed.lastPrice)}${cfg.SMOOTHING && engine.ema != null ? ' ema ' + fmt(engine.ema) : ''} | ` +
-      `${holding ? 'peak' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''} | next ${next}${stopStr}${volStr} | ` +
+      `${holding ? 'peak' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''} | next ${next}${stopStr}${volStr}${atrStr} | ` +
       `${holding ? 'unreal ' + signed(unreal) : 'flat'} | ` +
-      `RT ${s.roundTrips || 0} W${s.wins || 0}/L${s.losses || 0} | PnL ${signed(s.cumulativePnl || 0)} | ` +
+      `RT ${s.roundTrips || 0} W${s.wins || 0}/L${s.losses || 0} | PnL ${signed(s.cumulativePnl || 0)}${simStr} | ` +
       `${ticks}t/5s${feed.isStale() ? ' ⚠️STALE' : ''}`;
+
+    // sim hard-stop: shut down cleanly once the configured swap count is reached.
+    if (cfg.SIM_MODE && cfg.SIM_MAX_TX > 0 && (s.txCount || 0) >= cfg.SIM_MAX_TX) {
+      logger.renderStatus(line);
+      console.log(`\n🧪 [sim] reached ${s.txCount} transactions (target ${cfg.SIM_MAX_TX}) — stopping.`);
+      shutdown();
+      return;
+    }
 
     if (process.stdout.isTTY) {
       logger.renderStatus(line);

@@ -1,0 +1,18 @@
+# Keep secrets and bulky/irrelevant files OUT of the image
+node_modules
+npm-debug.log*
+
+# SECRETS — never bake these into an image layer
+.env
+.env.*
+ecosystem.config.js
+
+# VCS / build files
+.git
+.gitignore
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# docs / misc
+*.md

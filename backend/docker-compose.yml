@@ -1,0 +1,20 @@
+# docker-compose.yml — run the Eather bot in a container
+# ─────────────────────────────────────────────────────────────────────────────
+#   docker compose up --build        # start — defaults to SIMULATION (paper) mode
+#   docker compose down              # stop
+#
+# Secrets are read from ./.env at RUNTIME (env_file) — they are NOT in the image.
+# ⚠️ Dry-run NO LONGER EXISTS (removed 2026-06-19; BOT_DRY_RUN is ignored). The safe
+#    default below runs the SIM engine (virtual capital, real prices/fees, no wallet).
+#    To trade REAL funds, change `command` to: node botRunner.js
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  bot:
+    build: .
+    image: eather-bot:latest
+    container_name: eather-bot
+    env_file:
+      - .env                 # injected at runtime, not baked into the image
+    restart: unless-stopped
+    command: node botSimRunner.js   # ← SIM (no real funds). Use botRunner.js for LIVE.
+    # the bot only makes OUTBOUND calls (Mongo, Binance, Polygon RPC) — no ports exposed

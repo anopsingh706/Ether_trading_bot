@@ -89,7 +89,8 @@ class Dex {
   }
 
   // side: 'BUY' (USDC.e→WETH) | 'SELL' (WETH→USDC.e). amountIn = bigint in tokenIn units.
-  async swap(side, amountIn) {
+  // slippageTolerance: fraction (0.0015 = 0.15%); caller may widen it in fast markets.
+  async swap(side, amountIn, slippageTolerance = cfg.SLIPPAGE_TOLERANCE) {
     const isBuy = side === 'BUY';
     const tokenIn = isBuy ? cfg.USDC_ADDRESS : cfg.WETH_ADDRESS;
     const tokenOut = isBuy ? cfg.WETH_ADDRESS : cfg.USDC_ADDRESS;
@@ -103,8 +104,8 @@ class Dex {
 
     // 1) quote + min-output (slippage protection)
     const quoted = await this.quoteExactIn(tokenIn, tokenOut, amountIn);
-    const minOut = (quoted * BigInt(Math.floor((1 - cfg.SLIPPAGE_TOLERANCE) * 10000))) / 10000n;
-    logger.line(`   quote : ~${ethers.formatUnits(quoted, outDec)} ${outSym} | minOut ${ethers.formatUnits(minOut, outDec)} (slip ${(cfg.SLIPPAGE_TOLERANCE * 100).toFixed(2)}%)`);
+    const minOut = (quoted * BigInt(Math.floor((1 - slippageTolerance) * 10000))) / 10000n;
+    logger.line(`   quote : ~${ethers.formatUnits(quoted, outDec)} ${outSym} | minOut ${ethers.formatUnits(minOut, outDec)} (slip ${(slippageTolerance * 100).toFixed(2)}%)`);
 
     // 2) approve if needed
     await this._ensureAllowance(tokenInC, amountIn, inSym);

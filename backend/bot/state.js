@@ -8,13 +8,18 @@ const cfg = require('./config');
 const BotState = require('./models/BotState');
 const BotOrder = require('./models/BotOrder');
 
-const STATE_KEY = 'singleton';
+// Simulation runs against a SEPARATE state document so it can never read or write
+// the live position. (This is the isolation the old shared-singleton dry-run lacked.)
+const STATE_KEY = cfg.SIM_MODE ? 'sim-singleton' : 'singleton';
 
 // Recover the open position's cost basis from the most recent BUY order. Used on
 // resume and when reconciling a desynced position so the next SELL can still
 // compute profit.
 async function recoverEntryFromLastBuy(s) {
-  const lastBuy = await BotOrder.findOne({ side: 1 }).sort({ createdAt: -1 });
+  // Scope recovery to the right ledger: sim resumes from sim (dry_run) BUYs, live
+  // from live BUYs — so a sim resume can never pick up a real order's cost basis.
+  const scope = cfg.SIM_MODE ? { dry_run: true } : { dry_run: { $ne: true } };
+  const lastBuy = await BotOrder.findOne({ side: 1, ...scope }).sort({ createdAt: -1 });
   if (lastBuy) {
     s.entryUsdt = lastBuy.amount;
     s.entryWeth = lastBuy.quantity;
@@ -50,12 +55,24 @@ async function loadOrInit() {
       position: 'IN_USDT',
       anchorPrice: null,
       threshold: cfg.THRESHOLD,
+      // seed the virtual wallet for a fresh simulation
+      simUsdt: cfg.SIM_MODE ? cfg.SIM_CAPITAL : 0,
+      simWeth: 0,
     });
-    console.log('🆕 [state] initialised fresh state');
+    console.log(cfg.SIM_MODE
+      ? `🆕 [state] initialised fresh SIM state — virtual capital $${cfg.SIM_CAPITAL}`
+      : '🆕 [state] initialised fresh state');
     return s;
   }
 
   console.log('🔁 [state] resumed existing state from DB');
+
+  // SIM resume: make sure the virtual wallet is seeded (older sim docs may lack it).
+  if (cfg.SIM_MODE && s.simUsdt == null && s.position === 'IN_USDT') {
+    s.simUsdt = cfg.SIM_CAPITAL; s.simWeth = 0;
+    await s.save();
+    console.log(`🧪 [state] seeded virtual capital $${cfg.SIM_CAPITAL}`);
+  }
 
   // EDGE CASE: resumed while holding WETH but with no recorded cost basis
   // (e.g. state created before profit tracking existed). Recover it from the
@@ -109,6 +126,10 @@ async function saveAfterTrade(s) {
         wins: s.wins,
         losses: s.losses,
         cumulativePnl: s.cumulativePnl,
+        simUsdt: s.simUsdt,
+        simWeth: s.simWeth,
+        simGasUsd: s.simGasUsd,
+        txCount: s.txCount,
       },
     }
   );

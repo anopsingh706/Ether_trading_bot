@@ -7,6 +7,8 @@
     "start": "nodemon server.js",
     "bot": "node botRunner.js",
     "bot:dev": "nodemon botRunner.js",
+    "sim": "node botSimRunner.js",
+    "backtest": "node bot/backtest.js",
     "scan": "node bot/scanner.js"
   },
   "keywords": [],

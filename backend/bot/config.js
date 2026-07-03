@@ -35,6 +35,18 @@ module.exports = {
   // ── Mode ────────────────────────────────────────────────────────────────────
   BOT_DB_URL: deriveBotDbUrl(),
 
+  // ── Simulation (paper) mode ──────────────────────────────────────────────────
+  // BOT_SIM=true → NO real swaps, NO wallet, NO private key needed. Prices are the
+  // real-time Uniswap pool price; every fill is priced with the REAL QuoterV2 (so the
+  // 0.05% LP fee AND price impact are included) plus a real gas estimate. Trades run
+  // against a virtual SIM_CAPITAL balance. Fully isolated from live state (its own
+  // BotState document `sim-singleton`; orders tagged dry_run:true / route UNISWAP-SIM).
+  SIM_MODE:      bool(process.env.BOT_SIM, false),
+  SIM_CAPITAL:   num(process.env.BOT_SIM_CAPITAL, 1000),   // virtual starting USDC.e
+  SIM_TX_TARGET: num(process.env.BOT_SIM_TX_TARGET, 1000), // progress-display target (number of swaps)
+  SIM_MAX_TX:    num(process.env.BOT_SIM_MAX_TX, 0),       // hard-stop after N swaps (0 = off, run until stopped)
+  SIM_GAS_UNITS: num(process.env.BOT_SIM_GAS_UNITS, 0),    // override gas units/swap (0 = use QuoterV2 estimate)
+
   // ── Price feed (Binance WebSocket) ───────────────────────────────────────────
   WS_SYMBOL:   (process.env.BOT_WS_SYMBOL || 'ethusdt').toLowerCase(),  // ws stream
   REST_SYMBOL: process.env.CRYPTO_ID || 'ETHUSDT',                      // REST fallback
@@ -44,6 +56,9 @@ module.exports = {
   THRESHOLD:       num(process.env.BOT_THRESHOLD, 0.05),               // legacy single Δ (fallback)
   THRESHOLD_MODE:  (process.env.BOT_THRESHOLD_MODE || 'absolute'),     // 'absolute' | 'percent'
   TRADE_SIZE_MODE: (process.env.BOT_TRADE_SIZE_MODE || 'all'),         // 'all' (100%)
+  // Fixed-notional position size (USDC) per BUY. 0 = all-in (legacy). Smaller size
+  // → far less price impact (the dominant cost on the thin USDC.e pool). Sim only.
+  TRADE_USD:       num(process.env.BOT_TRADE_USD, 0),
   COOLDOWN_MS:     num(process.env.BOT_COOLDOWN_MS, 0),                // min gap between trades
 
   // #3 — Two thresholds: a WIDER entry confirmation + a TIGHTER trailing exit.
@@ -73,10 +88,35 @@ module.exports = {
   VOLUME_SYMBOL:      (process.env.BOT_VOLUME_SYMBOL || 'ethusdt').toLowerCase(),
   VOLUME_INTERVAL:    (process.env.BOT_VOLUME_INTERVAL || '1m'),
 
+  // ── ATR volatility filter (anti-whipsaw: don't trade dead / low-vol chop) ────
+  // ATR (Average True Range) from Binance klines. When the market is too quiet for a
+  // move to clear the round-trip cost, sit in cash instead of churning. Optionally
+  // makes the entry threshold adaptive (Δ scales with ATR). Source = the same kline
+  // stream the volume filter already uses (no extra RPC load).
+  ATR_FILTER:     bool(process.env.BOT_ATR_FILTER, true),
+  ATR_PERIOD:     num(process.env.BOT_ATR_PERIOD, 14),       // candles in the ATR average
+  ATR_MIN_PCT:    num(process.env.BOT_ATR_MIN_PCT, 0.12),    // min ATR as % of price to ALLOW entries (below = too quiet → sit out)
+  ATR_ENTRY_MULT: num(process.env.BOT_ATR_ENTRY_MULT, 0),    // >0: entry Δ = max(configured, ATR×mult) → wider triggers when volatile
+
   // ── Trend filter (Option B: "sit in cash" — only BUY in an uptrend) ──────────
+  // This is the adaptive downtrend guard (replaced the removed datum-line gate):
+  // blocks buys while price < its 15-min MA, and auto-releases when the trend turns —
+  // no fixed historical level to reclaim, so it can't lock the bot out indefinitely.
   TREND_FILTER:      bool(process.env.BOT_TREND_FILTER, true),         // on = block buys while price is below its moving average
   TREND_WINDOW_MS:   num(process.env.BOT_TREND_WINDOW_MS, 900000),     // moving-average window (default 15 min)
   TREND_MIN_SAMPLES: num(process.env.BOT_TREND_MIN_SAMPLES, 20),       // warm-up ticks before the filter acts
+
+  // ── Exit mode ────────────────────────────────────────────────────────────────
+  // 'classic'   = trailing Δ exit + 0.5% stop-loss (small losses cut early).
+  // 'breakeven' = NEVER sell below break-even (entry + fees + gas + BE_BUFFER_PCT):
+  //               hold underwater until price recovers, then exit at BE-or-better
+  //               (trailing above BE). The ONLY allowed loss is the deep DISASTER
+  //               stop, so a structural crash stays bounded instead of freezing the
+  //               bot forever. Backtested 30d crash: 97% green exits, 10 bounded
+  //               disasters vs 600+ small cuts in classic.
+  EXIT_MODE:         (process.env.BOT_EXIT_MODE || 'classic'),
+  DISASTER_STOP_PCT: num(process.env.BOT_DISASTER_STOP_PCT, 5),   // % below entry; 0 = off (⚠️ 30d test froze 719h holding −17%)
+  BE_BUFFER_PCT:     num(process.env.BOT_BE_BUFFER_PCT, 0.1),     // margin above true breakeven (covers gas + rounding)
 
   // ── Protective exits (cut a long instead of bag-holding) ─────────────────────
   // These OVERRIDE the MIN_NET_PROFIT guard below, so a losing/fading position is
@@ -99,6 +139,17 @@ module.exports = {
   //   fill on-chain — instead we DETECT it after the swap and alert (optionally halt).
   SLIPPAGE_ALERT_BPS: num(process.env.BOT_SLIPPAGE_BPS, 50),     // warn if a live fill deviates > this (basis points)
   SLIPPAGE_HALT:      bool(process.env.BOT_SLIPPAGE_HALT, false),// true = stop trading after a bad fill
+
+  // Gas-burn guard: a reverted swap still pays full gas. After ANY execution error,
+  // pause new swap attempts this long instead of retrying every tick (the 2026-07-02
+  // incident: 5 back-to-back minOut reverts in one fast move = pure wasted gas).
+  REVERT_BACKOFF_MS:  num(process.env.BOT_REVERT_BACKOFF_MS, 60000),
+
+  // Adaptive slippage: in fast markets the pool moves >0.15% between quote and landing,
+  // so a fixed tight minOut reverts every attempt. Tolerance = max(base, 1m-ATR% × MULT),
+  // capped at SLIPPAGE_MAX. Quiet market → base; volatility spike → wider but bounded.
+  SLIPPAGE_ATR_MULT:  num(process.env.BOT_SLIPPAGE_ATR_MULT, 2),
+  SLIPPAGE_MAX:       num(process.env.BOT_SLIPPAGE_MAX, 0.005),  // hard cap (0.5%)
 
   // ── Tokens / chain ───────────────────────────────────────────────────────────
   WETH_ADDRESS: trim(process.env.WETH_TOKEN_ADDRESS),

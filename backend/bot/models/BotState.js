@@ -21,9 +21,11 @@ const BotStateSchema = new Schema(
     lastActionAt:    { type: Date,   default: null },
     threshold:       { type: Number, default: 0.05 },
 
-    // dry-run simulated balances
+    // simulation (paper) virtual balances + accounting (BOT_SIM mode only)
     simUsdt:         { type: Number, default: 0 },
     simWeth:         { type: Number, default: 0 },
+    simGasUsd:       { type: Number, default: 0 },    // cumulative simulated gas (USD)
+    txCount:         { type: Number, default: 0 },    // total swaps executed (BUY + SELL)
 
     // cost basis of the CURRENTLY OPEN position (set on BUY, cleared on SELL)
     entryUsdt:       { type: Number, default: null }, // USDT spent to enter

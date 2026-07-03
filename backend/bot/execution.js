@@ -34,6 +34,16 @@ function getDex() {
 // Original GST formula: 0.005% of notional, then 18% GST on that.
 function gstOnUsdt(usdt) { return usdt * (0.005 / 100) * 0.18; }
 
+// Adaptive slippage tolerance: base in quiet markets; widened by live 1m ATR in fast
+// ones (so protective minOut reverts don't repeat every tick and burn gas), hard-capped.
+function slippageTol(atrPct) {
+  let tol = cfg.SLIPPAGE_TOLERANCE;
+  if (atrPct != null && cfg.SLIPPAGE_ATR_MULT > 0) {
+    tol = Math.max(tol, (atrPct / 100) * cfg.SLIPPAGE_ATR_MULT);
+  }
+  return Math.min(tol, cfg.SLIPPAGE_MAX);
+}
+
 // ── Shared finalize: update state + metrics, persist order, print ledger row ────
 async function finalize(side, s, price, extreme, amount, quantity, realized, meta) {
   let profit = null;
@@ -77,8 +87,12 @@ async function finalize(side, s, price, extreme, amount, quantity, realized, met
   const slippageBps = price > 0 ? Math.abs(realized - price) / price * 10000 : 0;
   if (slippageBps > cfg.SLIPPAGE_ALERT_BPS) {
     logger.warn(`SLIPPAGE ALERT: ${side} filled @ ${realized.toFixed(2)} vs decision ${price.toFixed(2)} = ${slippageBps.toFixed(1)} bps (tolerance ${cfg.SLIPPAGE_ALERT_BPS})`);
-    if (cfg.SLIPPAGE_HALT) { s.slippageHalt = true; logger.warn('SLIPPAGE_HALT is ON → trading will stop after this trade.'); }
+    // never halt the simulation on slippage — fee/impact-driven drift is expected there
+    if (cfg.SLIPPAGE_HALT && !meta.sim) { s.slippageHalt = true; logger.warn('SLIPPAGE_HALT is ON → trading will stop after this trade.'); }
   }
+
+  // count this swap (BUY + SELL each count as one transaction) — drives the sim target.
+  s.txCount = (s.txCount || 0) + 1;
 
   const code = await Counter.next('bot_order_code');
   await BotOrder.create({
@@ -101,9 +115,9 @@ async function finalize(side, s, price, extreme, amount, quantity, realized, met
     gst_charge: gstOnUsdt(amount),
     gst_applied: true,
     special: 0,
-    route: cfg.PRICE_SOURCE === 'uniswap' ? 'UNISWAP' : 'AMM',
+    route: meta.sim ? 'UNISWAP-SIM' : (cfg.PRICE_SOURCE === 'uniswap' ? 'UNISWAP' : 'AMM'),
     slippage_bps: slippageBps,
-    dry_run: false,
+    dry_run: !!meta.sim,
     tx_hash: meta.tx || null,
     status: 1,
   });
@@ -127,10 +141,11 @@ async function finalize(side, s, price, extreme, amount, quantity, realized, met
 }
 
 // ── LIVE (real Uniswap v3 swaps via SwapRouter02) ────────────────────────────
-async function execLive(side, s, price, reason) {
+async function execLive(side, s, price, reason, atrPct) {
   const extreme = s.anchorPrice;
   const dex = getDex();
   const before = await dex.balances();
+  const tol = slippageTol(atrPct);
 
   // ── Reconcile: trust the wallet, not the stored position flag. Prevents acting
   //    on a stale/incorrect position and the resulting retry spam (e.g. position
@@ -155,7 +170,7 @@ async function execLive(side, s, price, reason) {
   if (side === 'BUY') {
     if (before.pol <= 0n) { logger.warn('Cannot ENTER — no POL in wallet for gas'); return null; }
 
-    const res = await dex.swap('BUY', before.usdc); // spend all USDC.e → WETH
+    const res = await dex.swap('BUY', before.usdc, tol); // spend all USDC.e → WETH
     if (!res.success) { logger.warn('BUY swap failed/reverted'); return null; }
 
     const after = await dex.balances();
@@ -167,7 +182,7 @@ async function execLive(side, s, price, reason) {
   } else {
     if (before.pol <= 0n) { logger.warn('Cannot EXIT — no POL in wallet for gas'); return null; }
 
-    const res = await dex.swap('SELL', before.weth); // sell all WETH → USDC.e
+    const res = await dex.swap('SELL', before.weth, tol); // sell all WETH → USDC.e
     if (!res.success) { logger.warn('SELL swap failed/reverted'); return null; }
 
     const after = await dex.balances();
@@ -179,8 +194,12 @@ async function execLive(side, s, price, reason) {
   }
 }
 
-async function execute(side, s, price, reason) {
-  return execLive(side, s, price, reason);
+async function execute(side, s, price, reason, atrPct) {
+  if (cfg.SIM_MODE) {
+    const { execSim } = require('./simExecution'); // lazy: avoids loading a wallet/dex in sim
+    return execSim(side, s, price, reason);
+  }
+  return execLive(side, s, price, reason, atrPct);
 }
 
-module.exports = { execute };
+module.exports = { execute, finalize, slippageTol };
