@@ -255,4 +255,5 @@ invariant held. ⚠️ As the docs predict, each all-in round trip is **net-nega
 
 ## 11. Related docs
 - `docs/SRS_Trading_Bot.md` — the original spec/roadmap + locked decisions.
+- `docs/DB_SCHEMA.md` — MongoDB schema reference (collections auto-create on first run; fresh-DB behavior, field meanings, query cheat-sheet).
 - This file (`docs/PROJECT_STATUS.md`) — current handoff.
