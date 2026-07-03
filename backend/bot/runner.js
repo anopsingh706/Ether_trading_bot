@@ -4,6 +4,7 @@
 // route every tick into the strategy engine. Prints a trade ledger (one row per
 // trade), a periodic STATUS box with live metrics, and a session summary on exit.
 // ─────────────────────────────────────────────────────────────────────────────
+const pkg = require('../package.json');
 const cfg = require('./config');
 const botConn = require('./db');
 const PriceFeed = require('./priceFeed');
@@ -19,7 +20,7 @@ async function main() {
   await botConn.asPromise(); // wait for sandbox DB connection
 
   console.log('────────────────────────────────────────────────────────────');
-  console.log('🤖 Trading bot starting');
+  console.log(`🤖 Trading bot starting — v${pkg.version}`);
   if (cfg.SIM_MODE) {
     console.log(`   mode      : 🧪 SIMULATION (paper) — virtual $${cfg.SIM_CAPITAL} capital, NO real funds, no wallet`);
     console.log(`   sim cost  : real QuoterV2 fill (0.05% LP fee + price impact) + live gas estimate per swap`);

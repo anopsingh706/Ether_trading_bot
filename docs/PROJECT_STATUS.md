@@ -1,5 +1,13 @@
 # Eather Trading Bot — Project Status & Handoff
-**Last updated: 2026-06-30**
+**Version: 2.0.0 (git tag `v2.0.0`) · Last updated: 2026-07-03**
+
+> **V2 milestone (2026-07-03)** — the current working state, tagged `v2.0.0`:
+> $5/$3 raw-tick trailing reversal · **break-even exit mode** (no small-loss exits;
+> hold underwater for BE+0.1%; only the 5% disaster stop realizes a loss) ·
+> 15-min-MA trend gate (replaced datum) · spike-aware volume gate · ATR-adaptive
+> minOut slippage 0.15→0.50% + 60s revert backoff (alert 60bps) · plus the
+> fee-true simulator (`npm run sim`) and Binance-kline backtester (`npm run backtest`).
+> V1 = tag `v1.0.0` (commit 520a417). Details in the dated change-log entries below.
 
 This document is a complete handoff so work can continue in a fresh chat. The section
 directly below is the CURRENT state and supersedes the older sections (kept as history).
