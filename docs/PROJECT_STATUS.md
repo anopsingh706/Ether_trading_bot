@@ -1,5 +1,12 @@
 # Eather Trading Bot — Project Status & Handoff
-**Version: 2.0.0 (git tag `v2.0.0`) · Last updated: 2026-07-03**
+**Version: 2.1.0 · Last updated: 2026-07-06**
+
+> 🔒 **LOCKED STABLE VERSION — `v2.1.0` (2026-07-06):** the known-good working bot
+> (profitable spike-harvesting, break-even exits). Pinned by annotated tag **`v2.1.0`**
+> AND branch **`stable/v2`** on GitHub. To return to it at any time:
+> `git checkout stable/v2` (or `git checkout v2.1.0`) → `npm install` → keep your
+> local `backend/.env` (template = `example.env`, verified to mirror the live strategy).
+> New experiments happen on other branches/main — this reference never moves.
 
 > **V2 milestone (2026-07-03)** — the current working state, tagged `v2.0.0`:
 > $5/$3 raw-tick trailing reversal · **break-even exit mode** (no small-loss exits;
