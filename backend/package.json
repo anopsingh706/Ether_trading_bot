@@ -9,6 +9,7 @@
     "bot:dev": "nodemon botRunner.js",
     "sim": "node botSimRunner.js",
     "backtest": "node bot/backtest.js",
+    "lp:backtest": "node bot/lpBacktest.js",
     "scan": "node bot/scanner.js"
   },
   "keywords": [],
