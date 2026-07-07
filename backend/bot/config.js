@@ -118,6 +118,25 @@ module.exports = {
   DISASTER_STOP_PCT: num(process.env.BOT_DISASTER_STOP_PCT, 5),   // % below entry; 0 = off (⚠️ 30d test froze 719h holding −17%)
   BE_BUFFER_PCT:     num(process.env.BOT_BE_BUFFER_PCT, 0.1),     // margin above true breakeven (covers gas + rounding)
 
+  // Layer 1 — ε-tolerance below the BE floor: allows exits at ≥ BE×(1−ε) so a rebound
+  // that misses break-even by cents still banks (micro-loss ≈ $0.01–0.02) instead of
+  // riding a $40 drawdown. Directly fixes the "peaked at 1799, BE was 1798.7-on-pool,
+  // never sold, crashed to 1750" pattern. 0 = strict BE (old behaviour).
+  BE_TOLERANCE_PCT:  num(process.env.BOT_BE_TOLERANCE_PCT, 0.05),
+
+  // Layer 2 — underwater swing-repair: in a DEEP drawdown, sell big rebounds and re-buy
+  // the next dip to accumulate ETH against the same basis → the break-even RATCHETS
+  // DOWN each cycle, so a partial recovery can close the campaign at ≥ $0.
+  // ⚠️ BACKTEST VERDICT (30d & 90d, all tunings): NET-NEGATIVE vs plain hold-for-BE —
+  // real ETH drawdowns V-recover more often than they oscillate, so swing-sells mostly
+  // interrupt recoveries. Shipped OFF; enable only if you accept those numbers.
+  UW_SWING:          bool(process.env.BOT_UW_SWING, false),
+  UW_MIN_DROP_PCT:   num(process.env.BOT_UW_MIN_DROP_PCT, 0.5),   // arm swings only ≥ this % below BE (anti-churn)
+  SW_REB:            num(process.env.BOT_SW_REB, 15),             // $ rebound off the drawdown low before a swing-sell can arm
+  SW_REV:            num(process.env.BOT_SW_REV, 8),              // $ reversal off the rebound peak that fires it (also failsafe margin)
+  SW_COOL_MS:        num(process.env.BOT_SW_COOL_MS, 2700000),    // min gap between swing-sells (45 min)
+  SW_MAX:            num(process.env.BOT_SW_MAX, 10),             // max swing cycles per campaign
+
   // ── Protective exits (cut a long instead of bag-holding) ─────────────────────
   // These OVERRIDE the MIN_NET_PROFIT guard below, so a losing/fading position is
   // always cut rather than held through a downtrend (the exact trap that forced a

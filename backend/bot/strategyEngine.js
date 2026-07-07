@@ -36,6 +36,8 @@ class StrategyEngine {
     this._lastBackoffLog = 0;
     this._lastBeLog = 0;
     this.lastBE = null;      // current break-even level (exposed for the status line)
+    this._uwLow = null;      // Layer 2: drawdown low since entry/last swing (in-memory)
+    this._uwPeak = null;     // Layer 2: rebound peak since the low (in-memory)
     this.ema = null;        // #1: smoothed decision price (EMA); null until first tick
     this._emaTs = 0;
     this.priceHist = [];                                    // rolling {p, ts} for the trend MA
@@ -153,10 +155,11 @@ class StrategyEngine {
     return (s.entryUsdt * (1 + cfg.BE_BUFFER_PCT / 100)) / (s.entryWeth * (1 - fee));
   }
 
-  // 'breakeven' exit mode: NEVER sell below break-even — hold underwater until price
-  // recovers (no small red exits). Above BE, trail the peak with the BE as a hard
-  // floor. The ONLY loss this mode realizes is the deep disaster stop (raw price),
-  // which keeps a structural crash bounded instead of freezing the bot indefinitely.
+  // 'breakeven' exit mode: NEVER sell below the BE floor — hold underwater until price
+  // recovers (no small red exits). Above the floor, trail the peak with the floor as a
+  // hard minimum. The ONLY losses this mode realizes: the deep disaster stop, and (with
+  // Layer 1) micro-losses within the ε-band. Layer 2 (optional) swing-repairs deep
+  // drawdowns so the floor itself ratchets down.
   async _beExit(p, rawPrice) {
     const s = this.state;
     const be = this.beLevel();
@@ -167,31 +170,78 @@ class StrategyEngine {
       return;
     }
 
-    // 1) disaster stop — bounded catastrophe valve, checked on the RAW price
+    // Layer 1: ε-tolerance — exits allowed at ≥ BE×(1−ε), so a rebound that misses BE
+    // by cents still banks (worst case ≈ −$0.01–0.02) instead of riding a drawdown.
+    const floor = be * (1 - cfg.BE_TOLERANCE_PCT / 100);
+
+    // 1) disaster stop — bounded catastrophe valve, checked on the RAW price vs the
+    //    ORIGINAL campaign entry (swing-repairs don't move it).
     if (cfg.DISASTER_STOP_PCT > 0 && s.entryPrice != null) {
       const dropPct = ((s.entryPrice - rawPrice) / s.entryPrice) * 100;
       if (dropPct >= cfg.DISASTER_STOP_PCT) {
-        logger.warn(`DISASTER STOP: −${dropPct.toFixed(2)}% vs entry ${s.entryPrice.toFixed(2)} — cutting (the only loss breakeven mode realizes)`);
+        logger.warn(`DISASTER STOP: −${dropPct.toFixed(2)}% vs entry ${s.entryPrice.toFixed(2)} — cutting (the only large loss breakeven mode realizes)`);
         await this._act('SELL', p, 'disaster');
         return;
       }
     }
 
-    // 2) underwater — the peak has never reached break-even → HOLD, sell nothing
-    if (s.anchorPrice < be) {
-      const now = Date.now();
-      if (now - this._lastBeLog > 300000) {
-        this._lastBeLog = now;
-        const hrs = s.entryAt ? ((now - new Date(s.entryAt).getTime()) / 3600000).toFixed(1) : '?';
-        logger.note(`Underwater ${hrs}h: holding for break-even ${be.toFixed(2)} (price ${rawPrice.toFixed(2)}) — no loss exits in breakeven mode`);
-      }
+    // 2) armed (peak ≥ floor): trail the peak, floored at BE−ε
+    if (s.anchorPrice >= floor) {
+      const trail = s.anchorPrice - this._exitDelta(s.anchorPrice);
+      if (trail >= floor && p <= trail) { await this._act('SELL', p); return; } // profit-take
+      if (p <= floor) await this._act('SELL', p, 'breakeven');                  // faded → out at ≈BE
       return;
     }
 
-    // 3) armed (peak ≥ BE): trail the peak, floored at break-even
-    const trail = s.anchorPrice - this._exitDelta(s.anchorPrice);
-    if (trail >= be && p <= trail) { await this._act('SELL', p); return; } // profit-take
-    if (p <= be) await this._act('SELL', p, 'breakeven');                  // faded back → out at BE-or-better
+    // 3) underwater — HOLD (no loss exits)…
+    // Layer 2 (optional, ⚠️ backtest net-negative): in a DEEP drawdown, sell a big
+    // rebound that reverses, to re-buy the next dip → more ETH on the same basis →
+    // beLevel() ratchets down. Gated hard: min-drop, wide deltas, cooldown, cycle cap.
+    if (cfg.UW_SWING && !cfg.SIM_MODE) {
+      if (this._uwLow == null || rawPrice < this._uwLow) {
+        this._uwLow = rawPrice; this._uwPeak = null;        // new low voids the old rebound
+      } else if (this._uwLow <= be * (1 - cfg.UW_MIN_DROP_PCT / 100)
+                 && (s.swingCount || 0) < cfg.SW_MAX
+                 && (!s.lastSwingAt || Date.now() - new Date(s.lastSwingAt).getTime() >= cfg.SW_COOL_MS)) {
+        if (this._uwPeak == null || rawPrice > this._uwPeak) this._uwPeak = rawPrice;
+        else if (this._uwPeak >= this._uwLow + cfg.SW_REB && rawPrice <= this._uwPeak - cfg.SW_REV) {
+          logger.note(`Swing-sell: rebound ${this._uwLow.toFixed(2)}→${this._uwPeak.toFixed(2)} reversed to ${rawPrice.toFixed(2)} — selling to re-buy lower (BE ${be.toFixed(2)})`);
+          await this._act('SELL', p, 'swing-sell');
+          return;
+        }
+      }
+    }
+
+    const now = Date.now();
+    if (now - this._lastBeLog > 300000) {
+      this._lastBeLog = now;
+      const hrs = s.entryAt ? ((now - new Date(s.entryAt).getTime()) / 3600000).toFixed(1) : '?';
+      logger.note(`Underwater ${hrs}h: holding for break-even ${be.toFixed(2)} (price ${rawPrice.toFixed(2)}) — no loss exits in breakeven mode`);
+    }
+  }
+
+  // Layer 2 sub-state: IN_SWING — campaign open, holding cash after a swing-sell.
+  // Re-buy on a rebound off the swing low, or on the failsafe (price broke back above
+  // the swing-sell by SW_REV → the dip thesis is dead; re-buy to cap basis damage).
+  async _swingRebuy(p, rawPrice) {
+    const s = this.state;
+    // track the swing low on the trailing anchor (persisted like the IN_USDT trough)
+    if (s.anchorPrice == null || p < s.anchorPrice) {
+      s.anchorPrice = p;
+      s.anchorUpdatedAt = new Date();
+      await state.persistAnchor(s);
+      return;
+    }
+    if (s.swingSellPrice != null && rawPrice >= s.swingSellPrice + cfg.SW_REV) {
+      logger.note(`Swing failsafe: price ${rawPrice.toFixed(2)} broke above swing-sell ${s.swingSellPrice.toFixed(2)}+$${cfg.SW_REV} — re-buying now to cap basis damage`);
+      await this._act('BUY', p, 'swing-buy-failsafe');
+      return;
+    }
+    if (p >= s.anchorPrice + this._entryDelta(s.anchorPrice)) {
+      // NOTE: entry gates (volume/trend/ATR) intentionally NOT applied — this is
+      // position management inside an open campaign, not a fresh entry.
+      await this._act('BUY', p, 'swing-buy');
+    }
   }
 
   // Volume confirmation gate for BUYS. Returns true if the buy is blocked (low volume
@@ -289,6 +339,9 @@ class StrategyEngine {
         logger.note(`Fake spike rejected: fell to ${p.toFixed(2)} below trigger ${this._pendingEntry.level.toFixed(2)} before confirming — staying in cash`);
         this._pendingEntry = null;
       }
+    } else if (s.position === 'IN_SWING') {
+      // Layer 2 sub-state: waiting to re-buy after a swing-sell (campaign open).
+      await this._swingRebuy(p, price);
     } else {
       // IN_WETH: track the peak (new high) on the SMOOTHED price.
       if (s.anchorPrice == null || p > s.anchorPrice) {
@@ -358,7 +411,10 @@ class StrategyEngine {
       const a = this.volume ? this.volume.atr() : null;
       const atrPct = a && a.ready ? a.atrPct : null;
       const updated = await execution.execute(side, this.state, price, reason, atrPct);
-      if (updated) this.state = updated;
+      if (updated) {
+        this.state = updated;
+        this._uwLow = null; this._uwPeak = null; // position changed → fresh drawdown trackers
+      }
       if (this.state && this.state.slippageHalt) {
         this.halted = true;
         logger.warn('TRADING HALTED after a bad fill (SLIPPAGE_HALT). Restart the bot to resume.');

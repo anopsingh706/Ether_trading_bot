@@ -34,7 +34,8 @@ async function main() {
   console.log(`   swap safe : minOut slip ${(cfg.SLIPPAGE_TOLERANCE * 100).toFixed(2)}%→${(cfg.SLIPPAGE_MAX * 100).toFixed(2)}% (ATR-adaptive ×${cfg.SLIPPAGE_ATR_MULT}) | revert backoff ${Math.round(cfg.REVERT_BACKOFF_MS / 1000)}s`);
   console.log(`   trend flt : ${cfg.TREND_FILTER ? 'ON' : 'off'} — only buys in an uptrend (MA window ${Math.round(cfg.TREND_WINDOW_MS / 60000)}min)`);
   if (cfg.EXIT_MODE === 'breakeven') {
-    console.log(`   exits     : BREAK-EVEN mode — no loss exits (hold underwater for BE+${cfg.BE_BUFFER_PCT}%) | trail above BE | disaster stop ${cfg.DISASTER_STOP_PCT > 0 ? cfg.DISASTER_STOP_PCT + '%' : '⚠️ OFF (unbounded holds)'}`);
+    console.log(`   exits     : BREAK-EVEN mode — no loss exits (hold underwater for BE+${cfg.BE_BUFFER_PCT}%) | trail above BE | ε-tol ${cfg.BE_TOLERANCE_PCT}% | disaster stop ${cfg.DISASTER_STOP_PCT > 0 ? cfg.DISASTER_STOP_PCT + '%' : '⚠️ OFF (unbounded holds)'}`);
+    console.log(`   uw-swing  : ${cfg.UW_SWING ? `⚠️ ON — reb $${cfg.SW_REB}/rev $${cfg.SW_REV}, min-drop ${cfg.UW_MIN_DROP_PCT}%, cool ${Math.round(cfg.SW_COOL_MS / 60000)}m, max ${cfg.SW_MAX}/campaign (backtest: net-negative — your call)` : 'off (backtest verdict: hurts — enable with BOT_UW_SWING=true)'}`);
   } else {
     console.log(`   exits     : take-profit≥${cfg.MIN_NET_PROFIT} USDC | stop-loss ${cfg.STOP_LOSS_PCT > 0 ? cfg.STOP_LOSS_PCT + '%' : 'off'} | trend-exit ${cfg.TREND_EXIT ? 'on' : 'off'}`);
   }
@@ -81,9 +82,12 @@ async function main() {
     const exitDelta  = s.anchorPrice != null ? (pct ? (s.anchorPrice * cfg.EXIT_THRESHOLD)  / 100 : cfg.EXIT_THRESHOLD)  : 0;
 
     const holding = s.position === 'IN_WETH';
+    const swinging = s.position === 'IN_SWING';
     let next = '—';
     if (s.anchorPrice != null) {
-      next = holding ? `SELL≤${fmt(s.anchorPrice - exitDelta)}` : `BUY≥${fmt(s.anchorPrice + entryDelta)}`;
+      next = holding ? `SELL≤${fmt(s.anchorPrice - exitDelta)}`
+        : swinging ? `REBUY≥${fmt(s.anchorPrice + entryDelta)}${s.swingSellPrice ? '|fs≥' + fmt(s.swingSellPrice + cfg.SW_REV) : ''}`
+        : `BUY≥${fmt(s.anchorPrice + entryDelta)}`;
     }
     // show the exit levels while holding: BE floor (breakeven mode) or stop-loss (classic)
     let stopStr = '';
@@ -97,6 +101,8 @@ async function main() {
     let unreal = null;
     if (holding && s.entryPrice != null && s.entryWeth != null && feed.lastPrice != null) {
       unreal = (feed.lastPrice - s.entryPrice) * s.entryWeth;
+    } else if (swinging && s.swingCash != null && s.entryUsdt != null) {
+      unreal = s.swingCash - s.entryUsdt; // campaign progress while parked in cash
     }
 
     const tr = engine.lastTrend || {};
@@ -120,9 +126,9 @@ async function main() {
       simStr = ` | 💰$${equity.toFixed(2)} (gas $${(s.simGasUsd || 0).toFixed(2)}) | tx ${s.txCount || 0}/${cfg.SIM_TX_TARGET}`;
     }
     const line =
-      `⏳ ${holding ? 'HOLDING' : 'WAITING'} | last ${fmt(feed.lastPrice)}${cfg.SMOOTHING && engine.ema != null ? ' ema ' + fmt(engine.ema) : ''} | ` +
-      `${holding ? 'peak' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''} | next ${next}${stopStr}${volStr}${atrStr} | ` +
-      `${holding ? 'unreal ' + signed(unreal) : 'flat'} | ` +
+      `⏳ ${holding ? 'HOLDING' : swinging ? 'SWING' + (s.swingCount ? ' ' + s.swingCount + '/' + cfg.SW_MAX : '') : 'WAITING'} | last ${fmt(feed.lastPrice)}${cfg.SMOOTHING && engine.ema != null ? ' ema ' + fmt(engine.ema) : ''} | ` +
+      `${holding ? 'peak' : swinging ? 'low' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''} | next ${next}${stopStr}${volStr}${atrStr} | ` +
+      `${holding || swinging ? 'unreal ' + signed(unreal) : 'flat'} | ` +
       `RT ${s.roundTrips || 0} W${s.wins || 0}/L${s.losses || 0} | PnL ${signed(s.cumulativePnl || 0)}${simStr} | ` +
       `${ticks}t/5s${feed.isStale() ? ' ⚠️STALE' : ''}`;
 

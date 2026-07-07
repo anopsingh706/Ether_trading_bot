@@ -53,10 +53,20 @@ const LIVE = {
   stopPct:    num(process.env.BOT_STOP_LOSS_PCT, 0.5),
   // exit mode: 'classic' (trail + stop-loss) | 'be' (break-even floor: never realize a
   // loss; hold underwater until price recovers to breakeven, then exit at BE-or-better;
-  // only a deep disaster stop may realize a loss)
+  // only a deep disaster stop may realize a loss) | 'be-swing' ('be' + Layer 1 ε-band +
+  // Layer 2 underwater swing-repair: trade deep-drawdown rebounds to accumulate more
+  // ETH against the same basis, ratcheting the break-even DOWN each cycle)
   exitMode:    process.argv.includes('--exit') ? process.argv[process.argv.indexOf('--exit') + 1] : 'classic',
-  disasterPct: arg('disaster', 0),          // %; 0 = no disaster stop (be mode)
+  disasterPct: arg('disaster', 0),          // %; 0 = no disaster stop (be modes)
   beBuffer:    num(process.env.BT_BE_BUFFER, 0.0005), // extra margin above true breakeven
+  beTol:       num(process.env.BOT_BE_TOLERANCE_PCT, 0.05) / 100,  // Layer 1: ε-band below BE
+  uwMinDrop:   num(process.env.BOT_UW_MIN_DROP_PCT, 0.5) / 100,    // Layer 2: min drawdown before swing-trading arms
+  // Layer 2 anti-churn: swing legs use WIDER deltas than normal entries, a failsafe
+  // margin, a cooldown between swing-sells, and a per-campaign cap.
+  swReb:       arg('swreb', 15),   // $ rebound off the drawdown low before a swing-sell can arm
+  swRev:       arg('swrev', 8),    // $ reversal off the rebound peak that fires the swing-sell (also the failsafe margin)
+  swCoolMin:   arg('swcool', 45),  // minutes between swing-sells
+  swMax:       arg('swmax', 10),   // max swing cycles per campaign
 };
 
 // ── Historical klines (paginated) ─────────────────────────────────────────────
@@ -84,8 +94,11 @@ function replay(candles, p) {
   let anchor = null;
   let trades = 0, wins = 0, net = 0, gas = 0, fees = 0;
   let equity = CAPITAL, peakEq = CAPITAL, maxDD = 0;
-  let beLevel = null, beArmed = false;   // break-even floor state ('be' exit mode)
+  let beLevel = null, beArmed = false;   // break-even floor state ('be' exit modes)
   let entryIdx = 0, maxHoldMin = 0;      // longest time spent in one position (candles≈min)
+  // Layer 2 (be-swing) state: SWING = campaign open but holding cash mid-repair
+  let uwLow = null, uwPeak = null, swingSellPx = null, swingLow = null;
+  let swings = 0, swingFails = 0, sCamp = 0, lastSwingIdx = -1e9;
   const exits = {};
 
   // rolling gate data as of the PREVIOUS closed candle (no lookahead)
@@ -110,6 +123,7 @@ function replay(candles, p) {
     return s / p.trendWin;
   };
 
+  let campGas = 0; // cumulative gas across the whole campaign (entry + swing legs)
   const sell = (level, reason, i) => {
     const fill = level * (1 - COST_LEG);
     const proceeds = qty * fill - GAS_USD;
@@ -120,7 +134,11 @@ function replay(candles, p) {
     maxHoldMin = Math.max(maxHoldMin, i - entryIdx);
     cash = proceeds > 0 ? proceeds : 0; qty = 0; pos = 'CASH'; anchor = level;
     beLevel = null; beArmed = false;
+    uwLow = null; uwPeak = null; swingSellPx = null; swingLow = null; campGas = 0;
+    sCamp = 0; lastSwingIdx = -1e9;
   };
+  // campaign BE: sell level at which proceeds recover the ORIGINAL cash + all campaign gas
+  const recomputeBE = (p) => { beLevel = ((entryCost + campGas + GAS_USD) / (qty * (1 - COST_LEG))) * (1 + p.beBuffer); };
 
   for (let i = warm; i < candles.length; i++) {
     const k = candles[i];
@@ -140,21 +158,53 @@ function replay(candles, p) {
           const fill = level * (1 + COST_LEG);
           qty = (cash - GAS_USD) / fill;
           fees += (cash - GAS_USD) * COST_LEG / (1 + COST_LEG); gas += GAS_USD;
-          entryFill = fill; entryCost = cash;
-          // break-even sell LEVEL: qty × L × (1−fee) − gas ≥ entryCost  (+ small buffer)
-          beLevel = ((entryCost + GAS_USD) / (qty * (1 - COST_LEG))) * (1 + p.beBuffer);
+          entryFill = fill; entryCost = cash; campGas = GAS_USD;
+          recomputeBE(p);                                // break-even sell LEVEL for the campaign
           beArmed = false; entryIdx = i;
+          uwLow = level; uwPeak = null;
           cash = 0; pos = 'LONG'; anchor = level;
         }
-      } else if (p.exitMode === 'be') {
+      } else if (pos === 'SWING') {
+        // ── Layer 2 sub-state: campaign open, holding cash after a swing-sell ──────
+        if (swingLow == null || t < swingLow) { swingLow = t; continue; }
+        let level = null, fail = false;
+        if (t >= swingSellPx + p.swRev) { level = swingSellPx + p.swRev; fail = true; } // failsafe: price broke ABOVE the swing-sell by a margin → dip thesis dead, re-buy (bounded damage)
+        else if (t >= swingLow + p.entry) level = swingLow + p.entry;           // normal: rebound off the swing low
+        if (level != null) {
+          const fill = level * (1 + COST_LEG);
+          qty = (cash - GAS_USD) / fill;
+          fees += (cash - GAS_USD) * COST_LEG / (1 + COST_LEG); gas += GAS_USD; campGas += GAS_USD;
+          cash = 0; pos = 'LONG'; anchor = level;                               // arming peak restarts here
+          uwLow = level; uwPeak = null; swingSellPx = null; swingLow = null;
+          if (fail) swingFails++;
+          recomputeBE(p);                                                      // more ETH (or less on a failsafe) → BE ratchets
+        }
+      } else if (p.exitMode === 'be' || p.exitMode === 'be-swing') {
         // ── break-even floor exit: never realize a loss (except the disaster stop) ──
         if (anchor == null || t > anchor) anchor = t;
         if (p.disasterPct > 0 && ((entryFill - t) / entryFill) * 100 >= p.disasterPct) { sell(t, 'disaster', i); continue; }
-        if (t >= beLevel) beArmed = true;               // recovered to breakeven → arm the floor
-        if (!beArmed) continue;                          // underwater → HOLD, no selling
-        const trail = anchor - p.exit;
-        if (trail >= beLevel && t <= trail) sell(trail, 'reversal', i);       // ran higher → trail
-        else if (t <= beLevel) sell(beLevel, 'breakeven', i);                 // fell back → out at BE
+        const floorLvl = beLevel * (1 - (p.exitMode === 'be-swing' ? p.beTol : 0)); // Layer 1: ε-band
+        if (anchor >= floorLvl) {
+          // armed: trail the peak, floored at (BE − ε)
+          const trail = anchor - p.exit;
+          if (trail >= floorLvl && t <= trail) sell(trail, 'reversal', i);      // ran higher → trail
+          else if (t <= floorLvl) sell(floorLvl, 'breakeven', i);               // fell back → out at BE-or-≈BE
+        } else if (p.exitMode === 'be-swing' && sCamp < p.swMax && i - lastSwingIdx >= p.swCoolMin) {
+          // ── Layer 2: underwater swing-repair — trade deep-drawdown rebounds ──────
+          // Anti-churn: wide swing deltas (swReb/swRev ≫ normal), cooldown, campaign cap.
+          if (uwLow == null || t < uwLow) { uwLow = t; uwPeak = null; }
+          else if (uwLow <= beLevel * (1 - p.uwMinDrop)) {                      // only in a REAL drawdown
+            if (uwPeak == null || t > uwPeak) uwPeak = t;
+            else if (uwPeak >= uwLow + p.swReb && t <= uwPeak - p.swRev) {
+              // big rebound formed and reversed hard → swing-SELL (campaign stays open)
+              const level = uwPeak - p.swRev;
+              const proceeds = qty * level * (1 - COST_LEG) - GAS_USD;
+              fees += qty * level * COST_LEG; gas += GAS_USD; campGas += GAS_USD;
+              cash = proceeds; qty = 0; pos = 'SWING'; swings++; sCamp++; lastSwingIdx = i;
+              swingSellPx = level; swingLow = level;
+            }
+          }
+        }
       } else {
         // ── classic exit: trailing Δ + hard stop-loss ──
         if (anchor == null || t > anchor) { anchor = t; continue; }
@@ -163,19 +213,19 @@ function replay(candles, p) {
         if (t <= trigger) sell(trigger, 'reversal', i);
       }
     }
-    // honest equity mark every candle (in 'be' mode the pain is unrealized — count it)
-    equity = pos === 'CASH' ? cash : qty * k.c;
+    // honest equity mark every candle (in 'be' modes the pain is unrealized — count it)
+    equity = pos === 'LONG' ? qty * k.c : cash;
     peakEq = Math.max(peakEq, equity); maxDD = Math.max(maxDD, peakEq - equity);
   }
-  // mark-to-market if still holding at the end
+  // mark-to-market if a campaign is still open at the end
   let stuck = null;
-  if (pos === 'LONG') {
+  if (pos !== 'CASH') {
     const last = candles[candles.length - 1].c;
-    equity = qty * last * (1 - COST_LEG);
+    equity = pos === 'LONG' ? qty * last * (1 - COST_LEG) : cash;
     maxHoldMin = Math.max(maxHoldMin, candles.length - 1 - entryIdx);
     stuck = { unrealized: equity - entryCost, sinceMin: candles.length - 1 - entryIdx };
   }
-  return { trades, wins, net, fees, gas, maxDD, equity, exits, endFlat: pos === 'CASH', maxHoldMin, stuck };
+  return { trades, wins, net, fees, gas, maxDD, equity, exits, endFlat: pos === 'CASH', maxHoldMin, stuck, swings, swingFails };
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -192,7 +242,8 @@ function replay(candles, p) {
     const wr = r.trades ? Math.round((r.wins / r.trades) * 100) : 0;
     const hold = r.maxHoldMin >= 60 ? (r.maxHoldMin / 60).toFixed(1) + 'h' : r.maxHoldMin + 'm';
     const stuckStr = r.stuck ? `  ⚠️STUCK ${(r.stuck.sinceMin / 60).toFixed(1)}h unreal ${r.stuck.unrealized.toFixed(2)}` : '';
-    return `${label.padEnd(34)} RT ${String(r.trades).padStart(4)}  win ${String(wr).padStart(3)}%  net ${(r.net >= 0 ? '+' : '') + r.net.toFixed(2).padStart(7)}  fees ${r.fees.toFixed(2).padStart(6)}  maxDD ${r.maxDD.toFixed(2).padStart(5)}  maxHold ${hold.padStart(6)}  ${r.endFlat ? 'flat' : 'HOLDING'}${stuckStr}  ${JSON.stringify(r.exits)}`;
+    const swingStr = r.swings ? `  swings ${r.swings}(${r.swingFails}fs)` : '';
+    return `${label.padEnd(34)} RT ${String(r.trades).padStart(4)}  win ${String(wr).padStart(3)}%  net ${(r.net >= 0 ? '+' : '') + r.net.toFixed(2).padStart(7)}  fees ${r.fees.toFixed(2).padStart(6)}  maxDD ${r.maxDD.toFixed(2).padStart(5)}  maxHold ${hold.padStart(6)}  ${r.endFlat ? 'flat' : 'HOLDING'}${stuckStr}${swingStr}  ${JSON.stringify(r.exits)}`;
   };
 
   // 1) the CURRENT live config (exit mode from --exit, disaster stop from --disaster)

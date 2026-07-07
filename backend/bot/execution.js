@@ -34,6 +34,10 @@ function getDex() {
 // Original GST formula: 0.005% of notional, then 18% GST on that.
 function gstOnUsdt(usdt) { return usdt * (0.005 / 100) * 0.18; }
 
+// Wallet dust thresholds (below these a side is considered empty → reconcile)
+const WETH_DUST = ethers.parseUnits('0.0003', cfg.WETH_DECIMALS); // ~$0.5
+const USDC_DUST = ethers.parseUnits('1', cfg.USDT_DECIMALS);      // $1
+
 // Adaptive slippage tolerance: base in quiet markets; widened by live 1m ATR in fast
 // ones (so protective minOut reverts don't repeat every tick and burn gas), hard-capped.
 function slippageTol(atrPct) {
@@ -58,6 +62,7 @@ async function finalize(side, s, price, extreme, amount, quantity, realized, met
     s.entryGas = meta.gas || 0;
     s.entryAt = new Date();
     s.position = 'IN_WETH';
+    s.swingCash = null; s.swingSellPrice = null; s.swingCount = 0; s.lastSwingAt = null; // fresh campaign
   } else {
     // EXIT the market — realize the round-trip profit NET of gas (both legs).
     if (s.entryUsdt != null) {
@@ -72,8 +77,9 @@ async function finalize(side, s, price, extreme, amount, quantity, realized, met
     } else {
       logger.note('SELL with no recorded entry — profit unknown for this trade');
     }
-    // clear cost basis
+    // clear cost basis + campaign swing state
     s.entryUsdt = null; s.entryWeth = null; s.entryPrice = null; s.entryGas = null; s.entryAt = null;
+    s.swingCash = null; s.swingSellPrice = null; s.swingCount = 0; s.lastSwingAt = null;
     s.position = 'IN_USDT';
   }
 
@@ -150,8 +156,6 @@ async function execLive(side, s, price, reason, atrPct) {
   // ── Reconcile: trust the wallet, not the stored position flag. Prevents acting
   //    on a stale/incorrect position and the resulting retry spam (e.g. position
   //    says IN_WETH but the wallet has no WETH). ─────────────────────────────────
-  const WETH_DUST = ethers.parseUnits('0.0003', cfg.WETH_DECIMALS); // ~$0.5
-  const USDC_DUST = ethers.parseUnits('1', cfg.USDT_DECIMALS);      // $1
   if (side === 'SELL' && before.weth <= WETH_DUST) {
     state.reconcileToCash(s); await state.saveAfterTrade(s);
     logger.warn('No WETH to sell — wallet is flat. Position reconciled to IN_USDT.');
@@ -194,11 +198,113 @@ async function execLive(side, s, price, reason, atrPct) {
   }
 }
 
+// ── Layer 2 swing legs (LIVE): real swaps that do NOT open/close the campaign ─────
+// swing-SELL: dump all WETH mid-drawdown (campaign stays open, basis unchanged).
+// swing-BUY : re-enter with the swing cash; entryWeth is REPLACED with the (larger)
+//             quantity, so beLevel() ratchets down. entryUsdt/entryPrice/entryAt stay —
+//             they are the ORIGINAL campaign basis (P&L + disaster reference).
+async function writeSwingOrder(side, s, price, extreme, amount, quantity, realized, gas, tx, reason) {
+  const code = await Counter.next('bot_order_code');
+  await BotOrder.create({
+    order_code: code,
+    side: side === 'BUY' ? 1 : 2,
+    currency1: side === 'BUY' ? 'USDT' : 'WETH',
+    currency2: side === 'BUY' ? 'WETH' : 'USDT',
+    amount, quantity,
+    realized_rate: realized, rate: realized,
+    trigger_price: price, anchor_price: extreme,
+    profit: null, profit_gross: null, profit_pct: null,   // campaign still open — P&L on the final exit
+    exit_reason: reason,
+    gas_fee: gas || 0,
+    gst_charge: gstOnUsdt(amount), gst_applied: true,
+    slippage_bps: price > 0 ? Math.abs(realized - price) / price * 10000 : 0,
+    special: 3, // marks a swing leg
+    route: cfg.PRICE_SOURCE === 'uniswap' ? 'UNISWAP' : 'AMM',
+    dry_run: false, tx_hash: tx || null, status: 1,
+  });
+  logger.printTrade({ code, time: new Date(), side, trigger: price, extreme, usdt: amount, weth: quantity, profit: null, profitPct: null, cumPnl: s.cumulativePnl || 0 });
+  return code;
+}
+
+async function execSwingSell(s, price, atrPct) {
+  const extreme = s.anchorPrice;
+  const dex = getDex();
+  const before = await dex.balances();
+  if (before.weth <= WETH_DUST) {
+    state.reconcileToCash(s); await state.saveAfterTrade(s);
+    logger.warn('swing-sell: no WETH in wallet — reconciled to IN_USDT.');
+    return null;
+  }
+  if (before.pol <= 0n) { logger.warn('swing-sell blocked — no POL for gas'); return null; }
+
+  const res = await dex.swap('SELL', before.weth, slippageTol(atrPct));
+  if (!res.success) { logger.warn('swing-sell swap failed/reverted'); return null; }
+
+  const after = await dex.balances();
+  const usdcDelta = after.usdc > before.usdc ? after.usdc - before.usdc : 0n;
+  const amount = parseFloat(ethers.formatUnits(usdcDelta, cfg.USDT_DECIMALS));
+  const quantity = parseFloat(ethers.formatUnits(before.weth, cfg.WETH_DECIMALS));
+  const realized = quantity > 0 ? amount / quantity : price;
+
+  s.position = 'IN_SWING';
+  s.swingCash = amount;
+  s.swingSellPrice = realized;
+  s.swingCount = (s.swingCount || 0) + 1;
+  s.lastSwingAt = new Date();
+  s.entryGas = (s.entryGas || 0) + (res.gasCostUSD || 0); // campaign gas accumulates into the final net
+  s.anchorPrice = price; s.anchorUpdatedAt = new Date();  // start tracking the swing low from here
+  s.lastActionPrice = price; s.lastActionAt = new Date();
+  s.txCount = (s.txCount || 0) + 1;
+  await writeSwingOrder('SELL', s, price, extreme, amount, quantity, realized, res.gasCostUSD, res.txHash, 'swing-sell');
+  await state.saveAfterTrade(s);
+  logger.note(`Swing-sell done @ ${realized.toFixed(2)} — waiting to re-buy lower (cycle ${s.swingCount}/${cfg.SW_MAX})`);
+  return s;
+}
+
+async function execSwingBuy(s, price, atrPct, reason) {
+  const extreme = s.anchorPrice;
+  const dex = getDex();
+  const before = await dex.balances();
+  if (before.usdc <= USDC_DUST) {
+    if (before.weth > WETH_DUST) { await state.reconcileToWeth(s); await state.saveAfterTrade(s); logger.warn('swing-buy: wallet already holds WETH — reconciled to IN_WETH.'); }
+    else logger.warn('swing-buy blocked — wallet has no USDC.e');
+    return null;
+  }
+  if (before.pol <= 0n) { logger.warn('swing-buy blocked — no POL for gas'); return null; }
+
+  const res = await dex.swap('BUY', before.usdc, slippageTol(atrPct));
+  if (!res.success) { logger.warn('swing-buy swap failed/reverted'); return null; }
+
+  const after = await dex.balances();
+  const wethDelta = after.weth > before.weth ? after.weth - before.weth : 0n;
+  const amount = parseFloat(ethers.formatUnits(before.usdc, cfg.USDT_DECIMALS));
+  const quantity = parseFloat(ethers.formatUnits(wethDelta, cfg.WETH_DECIMALS));
+  const realized = quantity > 0 ? amount / quantity : price;
+
+  const prevQty = s.entryWeth;
+  s.position = 'IN_WETH';
+  s.entryWeth = quantity;                                  // replaced qty → beLevel() ratchets
+  s.swingCash = null; s.swingSellPrice = null;
+  s.entryGas = (s.entryGas || 0) + (res.gasCostUSD || 0);
+  s.anchorPrice = price; s.anchorUpdatedAt = new Date();   // arming peak restarts here
+  s.lastActionPrice = price; s.lastActionAt = new Date();
+  s.txCount = (s.txCount || 0) + 1;
+  await writeSwingOrder('BUY', s, price, extreme, amount, quantity, realized, res.gasCostUSD, res.txHash, reason || 'swing-buy');
+  await state.saveAfterTrade(s);
+  if (prevQty != null && quantity > 0) {
+    const gainPct = ((quantity / prevQty) - 1) * 100;
+    logger.note(`Swing-buy done @ ${realized.toFixed(2)} — ETH ${gainPct >= 0 ? '+' : ''}${gainPct.toFixed(2)}% vs before → break-even ratchets ${gainPct >= 0 ? 'DOWN' : 'UP'}`);
+  }
+  return s;
+}
+
 async function execute(side, s, price, reason, atrPct) {
   if (cfg.SIM_MODE) {
     const { execSim } = require('./simExecution'); // lazy: avoids loading a wallet/dex in sim
     return execSim(side, s, price, reason);
   }
+  if (reason === 'swing-sell') return execSwingSell(s, price, atrPct);
+  if (reason && reason.startsWith('swing-buy')) return execSwingBuy(s, price, atrPct, reason);
   return execLive(side, s, price, reason, atrPct);
 }
 

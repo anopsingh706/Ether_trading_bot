@@ -14,7 +14,8 @@ const botConn = require('../db');
 const BotStateSchema = new Schema(
   {
     key:             { type: String, default: 'singleton', unique: true, index: true },
-    position:        { type: String, enum: ['IN_USDT', 'IN_WETH'], default: 'IN_USDT' },
+    // IN_SWING = campaign open but holding cash mid swing-repair (Layer 2, UW_SWING)
+    position:        { type: String, enum: ['IN_USDT', 'IN_WETH', 'IN_SWING'], default: 'IN_USDT' },
     anchorPrice:     { type: Number, default: null },
     anchorUpdatedAt: { type: Date,   default: null },
     lastActionPrice: { type: Number, default: null },
@@ -33,6 +34,12 @@ const BotStateSchema = new Schema(
     entryPrice:      { type: Number, default: null }, // realized entry rate
     entryGas:        { type: Number, default: 0 },    // gas (USD) paid on the entry leg
     entryAt:         { type: Date,   default: null },
+
+    // Layer 2 swing-repair state (campaign-scoped; cleared on entry/exit)
+    swingCash:       { type: Number, default: null }, // USDC held while IN_SWING
+    swingSellPrice:  { type: Number, default: null }, // realized rate of the last swing-sell (failsafe reference)
+    swingCount:      { type: Number, default: 0 },    // swing cycles this campaign (cap = SW_MAX)
+    lastSwingAt:     { type: Date,   default: null }, // cooldown reference
 
     // running performance metrics (a round trip = one BUY then SELL)
     roundTrips:      { type: Number, default: 0 },
