@@ -48,6 +48,20 @@ function slippageTol(atrPct) {
   return Math.min(tol, cfg.SLIPPAGE_MAX);
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Escalating slippage ladder for EXIT retries: start at the normal adaptive tolerance,
+// then widen linearly up to EXIT_SLIPPAGE_MAX across EXIT_RETRY_MAX attempts. Completing
+// an exit near the peak beats dying to a tight minOut and chasing the market down.
+function exitTolSteps(baseTol) {
+  const max = cfg.EXIT_SLIPPAGE_MAX;
+  const n = Math.max(1, cfg.EXIT_RETRY_MAX);
+  if (n <= 1 || max <= baseTol) return [baseTol];
+  const steps = [];
+  for (let i = 0; i < n; i++) steps.push(baseTol + ((max - baseTol) * i) / (n - 1));
+  return steps;
+}
+
 // ── Shared finalize: update state + metrics, persist order, print ledger row ────
 async function finalize(side, s, price, extreme, amount, quantity, realized, meta) {
   let profit = null;
@@ -186,8 +200,24 @@ async function execLive(side, s, price, reason, atrPct) {
   } else {
     if (before.pol <= 0n) { logger.warn('Cannot EXIT — no POL in wallet for gas'); return null; }
 
-    const res = await dex.swap('SELL', before.weth, tol); // sell all WETH → USDC.e
-    if (!res.success) { logger.warn('SELL swap failed/reverted'); return null; }
+    // EXIT-COMPLETION RETRY (asymmetric): a SELL must LAND. Retrying with the same tight
+    // minOut just reverts again while price falls (the chase-down that dumped 1798→1766).
+    // Escalate the slippage across fast retries, hard-capped, so the exit fills near the
+    // peak. dex.swap re-quotes each attempt, so a wider tol is measured vs the fresh price.
+    const steps = exitTolSteps(tol);
+    let res = null;
+    for (let i = 0; i < steps.length; i++) {
+      try {
+        res = await dex.swap('SELL', before.weth, steps[i]); // sell all WETH → USDC.e
+        if (res.success) break;
+      } catch (e) {
+        const last = i + 1 >= steps.length;
+        logger.warn(`EXIT attempt ${i + 1}/${steps.length} @ ${(steps[i] * 100).toFixed(2)}% slip reverted — ${last ? 'giving up (engine backs off)' : `retrying wider in ${Math.round(cfg.EXIT_RETRY_DELAY_MS / 1000)}s`}`);
+        if (last) throw e;                    // exhausted → let the engine's REVERT_BACKOFF_MS take over
+        await sleep(cfg.EXIT_RETRY_DELAY_MS);
+      }
+    }
+    if (!res || !res.success) { logger.warn('SELL swap failed/reverted (all retries)'); return null; }
 
     const after = await dex.balances();
     const usdcDelta = after.usdc > before.usdc ? after.usdc - before.usdc : 0n;

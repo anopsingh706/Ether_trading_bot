@@ -168,7 +168,17 @@ module.exports = {
   // so a fixed tight minOut reverts every attempt. Tolerance = max(base, 1m-ATR% × MULT),
   // capped at SLIPPAGE_MAX. Quiet market → base; volatility spike → wider but bounded.
   SLIPPAGE_ATR_MULT:  num(process.env.BOT_SLIPPAGE_ATR_MULT, 2),
-  SLIPPAGE_MAX:       num(process.env.BOT_SLIPPAGE_MAX, 0.005),  // hard cap (0.5%)
+  SLIPPAGE_MAX:       num(process.env.BOT_SLIPPAGE_MAX, 0.005),  // hard cap (0.5%) — ENTRY quotes
+
+  // ── Exit-completion retry (asymmetric: a missed SELL chases the market down) ──
+  // A reverted BUY is free (the engine's REVERT_BACKOFF_MS handles it — a missed entry
+  // costs nothing). A reverted SELL is NOT: waiting 60s while price falls turned a 1798
+  // exit into a 1766 dump. So an EXIT escalates its slippage across fast retries until it
+  // LANDS, starting from the normal adaptive tol and widening to EXIT_SLIPPAGE_MAX.
+  // Each retry re-quotes at the current price, so the wider tol is measured fresh.
+  EXIT_RETRY_MAX:      num(process.env.BOT_EXIT_RETRY_MAX, 4),        // total SELL attempts incl. the first
+  EXIT_SLIPPAGE_MAX:   num(process.env.BOT_EXIT_SLIPPAGE_MAX, 0.02),  // exit-only hard cap (2%) — beats a 2%+ chase-down
+  EXIT_RETRY_DELAY_MS: num(process.env.BOT_EXIT_RETRY_DELAY_MS, 3000),// gap between escalating exit retries
 
   // ── Tokens / chain ───────────────────────────────────────────────────────────
   WETH_ADDRESS: trim(process.env.WETH_TOKEN_ADDRESS),
