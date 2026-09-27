@@ -31,9 +31,20 @@ const test = {
   BOT_COOLDOWN_MS:     '0',        // no re-entry cooldown
   BOT_MIN_NET_PROFIT:  '0',        // no profit guard — pure reversal
   BOT_STOP_LOSS_PCT:   '0',        // no protective stop — pure reversal
+  BOT_EXIT_MODE:       'classic',  // pure trailing reversal (sell on -0.05 off peak); NOT breakeven-hold
+  BOT_UW_SWING:        'false',     // no underwater swing-repair
+  // ── Fee-free compounding mode (user request 2026-07-08) ──────────────────────
+  BOT_SIM_NO_FEES:     'true',      // fill at signal price: NO LP fee, NO impact, NO gas (the "+$950" model)
+  BOT_PRICE_SOURCE:    'binance',   // signal from Binance WS → zero RPC, cannot touch the live bot
 };
 for (const [k, v] of Object.entries(test)) {
   if (!process.env[k]) process.env[k] = v;
+}
+
+if (String(process.env.BOT_SIM_NO_FEES).toLowerCase() === 'true') {
+  console.warn('\n⚠️  ⚠️  FEES DISABLED (BOT_SIM_NO_FEES=true) — fills are frictionless at the signal price.');
+  console.warn('    This is the OLD fee-blind paper model. Results are NOT realistic — real fees');
+  console.warn('    (0.05% LP + impact + gas) would erase them. Use for pure-strategy timing only.\n');
 }
 
 require('./bot/runner');

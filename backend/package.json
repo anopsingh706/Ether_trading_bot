@@ -1,6 +1,6 @@
 {
   "name": "backend",
-  "version": "2.2.0",
+  "version": "3.0.0",
   "description": "",
   "main": "index.js",
   "scripts": {
@@ -10,6 +10,7 @@
     "sim": "node botSimRunner.js",
     "backtest": "node bot/backtest.js",
     "lp:backtest": "node bot/lpBacktest.js",
+    "lead:scan": "node bot/cexLeadScan.js",
     "scan": "node bot/scanner.js"
   },
   "keywords": [],

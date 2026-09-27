@@ -86,11 +86,17 @@ async function execSim(side, s, price, reason) {
     const cash = cfg.TRADE_USD > 0 ? Math.min(s.simUsdt, cfg.TRADE_USD) : s.simUsdt;
     if (!(cash > 0)) { logger.warn('[sim] BUY skipped — no virtual USDC.e'); return null; }
 
-    const amountIn = ethers.parseUnits(cash.toFixed(cfg.USDT_DECIMALS), cfg.USDT_DECIMALS);
-    const { amountOut, gasEstimate } = await quote(cfg.USDC_ADDRESS, cfg.WETH_ADDRESS, amountIn);
-    const gas = await gasUSD(gasEstimate);
-
-    const quantity = parseFloat(ethers.formatUnits(amountOut, cfg.WETH_DECIMALS)); // WETH received (fee + impact already applied)
+    let quantity, gas;
+    if (cfg.SIM_NO_FEES) {
+      // Frictionless fill at the signal price — no LP fee, no impact, no gas.
+      quantity = cash / price;
+      gas = 0;
+    } else {
+      const amountIn = ethers.parseUnits(cash.toFixed(cfg.USDT_DECIMALS), cfg.USDT_DECIMALS);
+      const q = await quote(cfg.USDC_ADDRESS, cfg.WETH_ADDRESS, amountIn);
+      gas = await gasUSD(q.gasEstimate);
+      quantity = parseFloat(ethers.formatUnits(q.amountOut, cfg.WETH_DECIMALS)); // WETH received (fee + impact already applied)
+    }
     const amount = cash;                                                            // USDC.e spent = cost basis
     const realized = quantity > 0 ? amount / quantity : price;
 
@@ -100,7 +106,7 @@ async function execSim(side, s, price, reason) {
     s.simWeth = (s.simWeth || 0) + quantity;
     s.simGasUsd = (s.simGasUsd || 0) + gas;
 
-    logger.line(`\n🧪 [sim] BUY ${amount.toFixed(2)} USDC.e → ${quantity.toFixed(6)} WETH @ ${realized.toFixed(2)} | LP fee+impact in quote | gas ~$${gas}`);
+    logger.line(`\n🧪 [sim] BUY ${amount.toFixed(2)} USDC.e → ${quantity.toFixed(6)} WETH @ ${realized.toFixed(2)} | ${cfg.SIM_NO_FEES ? 'frictionless — no fee/impact/gas' : `LP fee+impact in quote | gas ~$${gas}`}`);
     return finalize('BUY', s, price, extreme, amount, quantity, realized, { sim: true, gas, tx: null, reason });
   }
 
@@ -108,11 +114,17 @@ async function execSim(side, s, price, reason) {
   const wethBal = s.simWeth;
   if (!(wethBal > 0)) { logger.warn('[sim] SELL skipped — no virtual WETH'); return null; }
 
-  const amountIn = ethers.parseUnits(wethBal.toFixed(cfg.WETH_DECIMALS), cfg.WETH_DECIMALS);
-  const { amountOut, gasEstimate } = await quote(cfg.WETH_ADDRESS, cfg.USDC_ADDRESS, amountIn);
-  const gas = await gasUSD(gasEstimate);
-
-  const proceeds = parseFloat(ethers.formatUnits(amountOut, cfg.USDT_DECIMALS)); // USDC.e out (fee + impact already applied)
+  let proceeds, gas;
+  if (cfg.SIM_NO_FEES) {
+    // Frictionless fill at the signal price — no LP fee, no impact, no gas.
+    proceeds = wethBal * price;
+    gas = 0;
+  } else {
+    const amountIn = ethers.parseUnits(wethBal.toFixed(cfg.WETH_DECIMALS), cfg.WETH_DECIMALS);
+    const q = await quote(cfg.WETH_ADDRESS, cfg.USDC_ADDRESS, amountIn);
+    gas = await gasUSD(q.gasEstimate);
+    proceeds = parseFloat(ethers.formatUnits(q.amountOut, cfg.USDT_DECIMALS)); // USDC.e out (fee + impact already applied)
+  }
   const quantity = wethBal;
   const realized = quantity > 0 ? proceeds / quantity : price;
 
@@ -121,7 +133,7 @@ async function execSim(side, s, price, reason) {
   s.simUsdt = (s.simUsdt || 0) + proceeds - gas;
   s.simGasUsd = (s.simGasUsd || 0) + gas;
 
-  logger.line(`\n🧪 [sim] SELL ${quantity.toFixed(6)} WETH → ${proceeds.toFixed(2)} USDC.e @ ${realized.toFixed(2)} | LP fee+impact in quote | gas ~$${gas}`);
+  logger.line(`\n🧪 [sim] SELL ${quantity.toFixed(6)} WETH → ${proceeds.toFixed(2)} USDC.e @ ${realized.toFixed(2)} | ${cfg.SIM_NO_FEES ? 'frictionless — no fee/impact/gas' : `LP fee+impact in quote | gas ~$${gas}`}`);
   // finalize computes net P&L (gross − both legs' gas) for the ledger/metrics.
   return finalize('SELL', s, price, extreme, proceeds, quantity, realized, { sim: true, gas, tx: null, reason });
 }

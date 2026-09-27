@@ -27,6 +27,7 @@ class VolumeFeed extends EventEmitter {
     this.currentVolume = null; // in-progress candle volume (display only)
     this.lastClosedTs = 0;
     this.closedCandles = [];   // last (ATR_PERIOD+1) CLOSED OHLC candles for ATR
+    this.closedCloses = [];    // last (RSI_PERIOD+1) CLOSED candle closes for RSI
   }
 
   start() {
@@ -38,7 +39,7 @@ class VolumeFeed extends EventEmitter {
   // Backfill the last N CLOSED candles from Binance REST so the volume + ATR filters
   // are active from the first tick instead of waiting ~WINDOW/PERIOD minutes to warm up.
   async _seed() {
-    const limit = Math.max(cfg.VOLUME_WINDOW, cfg.ATR_PERIOD) + 2;
+    const limit = Math.max(cfg.VOLUME_WINDOW, cfg.ATR_PERIOD, cfg.RSI_PERIOD) + 2;
     const url = `https://api.binance.com/api/v3/klines?symbol=${cfg.VOLUME_SYMBOL.toUpperCase()}&interval=${cfg.VOLUME_INTERVAL}&limit=${limit}`;
     const r = await axios.get(url, { timeout: 8000 });
     const rows = Array.isArray(r.data) ? r.data : [];
@@ -46,8 +47,9 @@ class VolumeFeed extends EventEmitter {
     if (!closed.length) return;
     this.closedVolumes = closed.map((k) => parseFloat(k[5])).slice(-(cfg.VOLUME_WINDOW + 1));
     this.closedCandles = closed.map((k) => ({ h: parseFloat(k[2]), l: parseFloat(k[3]), c: parseFloat(k[4]) })).slice(-(cfg.ATR_PERIOD + 1));
+    this.closedCloses = closed.map((k) => parseFloat(k[4])).slice(-(cfg.RSI_PERIOD + 1));
     this.lastClosedTs = Date.now();
-    console.log(`📊 [volume] REST-seeded ${closed.length} ${cfg.VOLUME_INTERVAL} candles — volume + ATR ready immediately`);
+    console.log(`📊 [volume] REST-seeded ${closed.length} ${cfg.VOLUME_INTERVAL} candles — volume + ATR + RSI ready immediately`);
   }
 
   stop() {
@@ -75,6 +77,9 @@ class VolumeFeed extends EventEmitter {
           this.closedCandles.push({ h: parseFloat(k.h), l: parseFloat(k.l), c: parseFloat(k.c) });
           const cmax = cfg.ATR_PERIOD + 1;
           while (this.closedCandles.length > cmax) this.closedCandles.shift();
+          this.closedCloses.push(parseFloat(k.c));
+          const rmax = cfg.RSI_PERIOD + 1;
+          while (this.closedCloses.length > rmax) this.closedCloses.shift();
           this.lastClosedTs = Date.now();
         }
       } catch (_) { /* ignore malformed frame */ }
@@ -127,6 +132,28 @@ class VolumeFeed extends EventEmitter {
     const lastClose = c[c.length - 1].c;
     const atrPct = lastClose > 0 ? (atr / lastClose) * 100 : null;
     return { ready: true, atr, atrPct, n: c.length };
+  }
+
+  // RSI (Relative Strength Index) over the last RSI_PERIOD CLOSED candle-to-candle
+  // changes. Plain (non-Wilder-smoothed) average of gains vs losses, recomputed fresh
+  // each closed candle — same style as the ATR calc above. 0-100: low = recently sold
+  // off hard (oversold), high = recently bought up hard (overbought). Returns
+  // { ready, rsi, n }.
+  rsi() {
+    const c = this.closedCloses;
+    const period = cfg.RSI_PERIOD;
+    if (c.length < period + 1) return { ready: false, rsi: null, n: c.length };
+    let gains = 0, losses = 0;
+    for (let i = 1; i < c.length; i++) {
+      const diff = c[i] - c[i - 1];
+      if (diff >= 0) gains += diff; else losses -= diff;
+    }
+    const avgGain = gains / period;
+    const avgLoss = losses / period;
+    if (avgLoss === 0) return { ready: true, rsi: 100, n: c.length };
+    const rs = avgGain / avgLoss;
+    const rsi = 100 - 100 / (1 + rs);
+    return { ready: true, rsi, n: c.length };
   }
 }
 

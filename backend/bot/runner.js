@@ -23,7 +23,9 @@ async function main() {
   console.log(`🤖 Trading bot starting — v${pkg.version}`);
   if (cfg.SIM_MODE) {
     console.log(`   mode      : 🧪 SIMULATION (paper) — virtual $${cfg.SIM_CAPITAL} capital, NO real funds, no wallet`);
-    console.log(`   sim cost  : real QuoterV2 fill (0.05% LP fee + price impact) + live gas estimate per swap`);
+    console.log(cfg.SIM_NO_FEES
+      ? `   sim cost  : ⚠️ NONE — frictionless fill at signal price (NO fee/impact/gas — NOT realistic)`
+      : `   sim cost  : real QuoterV2 fill (0.05% LP fee + price impact) + live gas estimate per swap`);
     console.log(`   sim target: ~${cfg.SIM_TX_TARGET} transactions${cfg.SIM_MAX_TX > 0 ? ` (hard stop at ${cfg.SIM_MAX_TX})` : ' (run until stopped)'}`);
   } else {
     console.log('   mode      : ⚠️  LIVE (real funds) — every run trades real money');
@@ -41,7 +43,9 @@ async function main() {
   }
   console.log(`   filters   : fake-spike confirm ${cfg.ENTRY_CONFIRM_MS > 0 ? Math.round(cfg.ENTRY_CONFIRM_MS / 1000) + 's' : 'off'} | cooldown ${cfg.COOLDOWN_MS > 0 ? Math.round(cfg.COOLDOWN_MS / 1000) + 's' : 'off'} | feed read ≤1/${Math.round(cfg.FEED_MIN_READ_MS / 1000)}s`);
   console.log(`   volume    : ${cfg.VOLUME_FILTER ? 'confirm ON — buy only if ' + cfg.VOLUME_SYMBOL.toUpperCase() + ' ' + cfg.VOLUME_INTERVAL + ' vol ≥ ' + cfg.VOLUME_MULT + '× ' + cfg.VOLUME_WINDOW + '-MA' : 'off'}`);
-  console.log(`   atr filt  : ${cfg.ATR_FILTER ? 'ON — skip entries when ATR < ' + cfg.ATR_MIN_PCT + '% (period ' + cfg.ATR_PERIOD + ')' + (cfg.ATR_ENTRY_MULT > 0 ? ', adaptive Δ ×' + cfg.ATR_ENTRY_MULT : '') : 'off'}`);
+  console.log(`   atr filt  : ${cfg.ATR_FILTER ? 'ON — skip entries when ATR < ' + cfg.ATR_MIN_PCT + '% (period ' + cfg.ATR_PERIOD + ')' : 'off'}`);
+  console.log(`   atr trig  : entry ${cfg.ATR_ENTRY_MULT > 0 ? 'ATR×' + cfg.ATR_ENTRY_MULT + ' (replaces fixed $ once warm)' : 'off (fixed $ threshold)'} | exit ${cfg.ATR_EXIT_MULT > 0 ? 'ATR×' + cfg.ATR_EXIT_MULT : 'off (fixed $ threshold)'}`);
+  console.log(`   rsi filt  : ${cfg.RSI_FILTER ? 'ON — buy only if RSI ≤ ' + cfg.RSI_MAX_ENTRY + ' (period ' + cfg.RSI_PERIOD + ', confirms a real oversold dip)' : 'off'}`);
   console.log(`   db        : ${botConn.name}`);
   console.log(`   price src : ${cfg.PRICE_SOURCE === 'uniswap' ? 'Uniswap v3 pool (Polygon, on-chain)' : 'Binance ' + cfg.WS_SYMBOL}`);
   console.log('────────────────────────────────────────────────────────────');
@@ -107,18 +111,9 @@ async function main() {
 
     const tr = engine.lastTrend || {};
     const trendStr = !tr.ready ? 'warming' : (tr.up ? 'up' : 'down');
-    let volStr = '';
-    if (volumeFeed && cfg.VOLUME_FILTER) {
-      const vc = volumeFeed.check(cfg.VOLUME_MULT);
-      volStr = !vc.active
-        ? ` | vol warm(${vc.n}/${cfg.VOLUME_WINDOW})`
-        : ` | vol ${vc.ma > 0 ? (vc.recent / vc.ma).toFixed(1) + '×' : 'n/a'}${vc.ok ? '✓' : '✗'}`;
-    }
-    let atrStr = '';
-    if (volumeFeed && cfg.ATR_FILTER) {
-      const a = volumeFeed.atr();
-      atrStr = a.ready ? ` | atr ${a.atrPct.toFixed(2)}%${a.atrPct < cfg.ATR_MIN_PCT ? '✗' : '✓'}` : ' | atr warm';
-    }
+    // NOTE: volume/ATR/RSI filter readouts were dropped from this line to keep it short
+    // and stable in the terminal — a blocked buy still prints its own reason via
+    // logger.note() (throttled) from the strategy engine when it happens.
     // sim: show virtual equity (cash + WETH marked at the live price) and tx progress
     let simStr = '';
     if (cfg.SIM_MODE) {
@@ -127,7 +122,7 @@ async function main() {
     }
     const line =
       `⏳ ${holding ? 'HOLDING' : swinging ? 'SWING' + (s.swingCount ? ' ' + s.swingCount + '/' + cfg.SW_MAX : '') : 'WAITING'} | last ${fmt(feed.lastPrice)}${cfg.SMOOTHING && engine.ema != null ? ' ema ' + fmt(engine.ema) : ''} | ` +
-      `${holding ? 'peak' : swinging ? 'low' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''} | next ${next}${stopStr}${volStr}${atrStr} | ` +
+      `${holding ? 'peak' : swinging ? 'low' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''} | next ${next}${stopStr} | ` +
       `${holding || swinging ? 'unreal ' + signed(unreal) : 'flat'} | ` +
       `RT ${s.roundTrips || 0} W${s.wins || 0}/L${s.losses || 0} | PnL ${signed(s.cumulativePnl || 0)}${simStr} | ` +
       `${ticks}t/5s${feed.isStale() ? ' ⚠️STALE' : ''}`;

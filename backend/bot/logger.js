@@ -45,11 +45,18 @@ const rowStr = (vals) => '│' + vals.map((v, i) => ' ' + cell(String(v), COLS[i
 // ── live status line (in-place, TTY only) ───────────────────────────────────
 let _statusShown = false;
 let _lastStatus = '';
-const _termWidth = () => process.stdout.columns || 100;
+let _statusRows = 1; // how many terminal rows the currently-shown status wraps across
+const _termWidth = () => process.stdout.columns || 80;
 
+// A plain '\r' only rewinds the cursor to the start of the CURRENT row — if the last
+// status line wrapped onto 2+ rows (narrow terminal, or npm's spawned shell misreporting
+// its width), that only erases the last row and leaves the earlier ones stuck on screen
+// forever, so the line appears to grow instead of update in place. Move up to the first
+// wrapped row, then erase everything from there to the end of the screen.
 function _clearStatus() {
   if (process.stdout.isTTY && _statusShown) {
-    process.stdout.write('\r' + ' '.repeat(_termWidth() - 1) + '\r');
+    if (_statusRows > 1) process.stdout.write(`\x1b[${_statusRows - 1}A`);
+    process.stdout.write('\r\x1b[0J');
     _statusShown = false;
   }
 }
@@ -57,7 +64,8 @@ function renderStatus(text) {
   _lastStatus = text;
   if (!process.stdout.isTTY) return;       // never pollute piped/redirected logs
   _clearStatus();
-  process.stdout.write('\r' + text.slice(0, _termWidth() - 1));
+  process.stdout.write(text);
+  _statusRows = Math.max(1, Math.ceil(text.length / _termWidth()));
   _statusShown = true;
 }
 function statusLineNonTTY(text) { console.log(text); } // sparse liveness for log files

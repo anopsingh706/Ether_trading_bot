@@ -32,6 +32,8 @@ class StrategyEngine {
     this._lastExitLog = 0;
     this._lastAtrLog = 0;
     this.lastAtr = null;     // last ATR check (exposed for the status line)
+    this._lastRsiLog = 0;
+    this.lastRsi = null;     // last RSI check (exposed for the status line)
     this._revertUntil = 0;   // gas-burn guard: no swap attempts until this time after an execution error
     this._lastBackoffLog = 0;
     this._lastBeLog = 0;
@@ -56,18 +58,26 @@ class StrategyEngine {
 
   // #3 — thresholds in price terms (absolute USD, or % of the anchor): a WIDER
   // entry confirmation and a TIGHTER trailing exit.
+  //
+  // ATR-adaptive mode (BOT_ATR_ENTRY_MULT/BOT_ATR_EXIT_MULT > 0): once ATR is warm, the
+  // trigger Δ = ATR × mult — this REPLACES the fixed threshold (not just a floor), so a
+  // calm market gets a smaller trigger and a wild market gets a bigger one. The fixed
+  // BOT_ENTRY_THRESHOLD/BOT_EXIT_THRESHOLD only apply as a fallback while ATR warms up.
   _entryDelta(anchor) {
     let d = cfg.THRESHOLD_MODE === 'percent' ? (anchor * cfg.ENTRY_THRESHOLD) / 100 : cfg.ENTRY_THRESHOLD;
-    // ATR-adaptive: widen the trigger when the market is volatile so we don't enter on
-    // sub-volatility noise (only active when BOT_ATR_ENTRY_MULT > 0).
     if (cfg.ATR_ENTRY_MULT > 0 && this.volume) {
       const a = this.volume.atr();
-      if (a.ready) d = Math.max(d, a.atr * cfg.ATR_ENTRY_MULT);
+      if (a.ready) d = a.atr * cfg.ATR_ENTRY_MULT;
     }
     return d;
   }
   _exitDelta(anchor) {
-    return cfg.THRESHOLD_MODE === 'percent' ? (anchor * cfg.EXIT_THRESHOLD) / 100 : cfg.EXIT_THRESHOLD;
+    let d = cfg.THRESHOLD_MODE === 'percent' ? (anchor * cfg.EXIT_THRESHOLD) / 100 : cfg.EXIT_THRESHOLD;
+    if (cfg.ATR_EXIT_MULT > 0 && this.volume) {
+      const a = this.volume.atr();
+      if (a.ready) d = a.atr * cfg.ATR_EXIT_MULT;
+    }
+    return d;
   }
 
   // #1 — EMA-smoothed decision price. Time-based, so irregular tick spacing (WSS
@@ -283,6 +293,23 @@ class StrategyEngine {
     return true;
   }
 
+  // RSI momentum-confirmation gate for BUYS. Confirms the dip the entry trigger reacted
+  // to was a genuine oversold move (RSI low → recently sold off hard) rather than a
+  // random tick already back near/above neutral. Returns true if the buy is blocked.
+  _rsiBlocksBuy() {
+    if (!cfg.RSI_FILTER || !this.volume) return false;
+    const r = this.volume.rsi();
+    this.lastRsi = r;
+    if (!r.ready) return false;                      // warming up → don't gate yet
+    if (r.rsi <= cfg.RSI_MAX_ENTRY) return false;    // genuinely oversold → allow
+    const now = Date.now();
+    if (now - this._lastRsiLog > 30000) {
+      this._lastRsiLog = now;
+      logger.note(`Buy skipped: RSI ${r.rsi.toFixed(1)} > ${cfg.RSI_MAX_ENTRY} — bounce isn't from an oversold dip, likely noise`);
+    }
+    return true;
+  }
+
   // Trend filter gate for BUYS (throttled log). Returns true if a buy is blocked.
   _trendBlocksBuy(price, trend) {
     if (!cfg.TREND_FILTER || (trend.ready && trend.up)) return false;
@@ -331,6 +358,7 @@ class StrategyEngine {
           this._pendingEntry = null; // held the full window → real breakout
         }
         if (this._atrBlocksBuy()) return;        // anti-whipsaw: skip dead / low-volatility chop
+        if (this._rsiBlocksBuy()) return;        // momentum confirmation: was this really an oversold dip?
         if (this._trendBlocksBuy(price, trend)) return;
         if (this._volumeBlocksBuy()) return;     // false-breakout filter (volume confirmation)
         await this._act('BUY', p);

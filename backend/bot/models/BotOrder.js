@@ -10,6 +10,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 const { Schema } = require('mongoose');
 const botConn = require('../db');
+const cfg = require('../config');
 
 const BotOrderSchema = new Schema(
   {
@@ -41,4 +42,8 @@ const BotOrderSchema = new Schema(
   { timestamps: true }
 );
 
-module.exports = botConn.model('BotOrder', BotOrderSchema, 'bot_orders');
+// SIM (paper) runs write to a SEPARATE collection so simulated trades can never land
+// in the real trade ledger again (2026-09-26: a mixed collection had grown to 22k+
+// documents, 98% of them simulation noise, from repeated sim runs over time).
+const COLLECTION = cfg.SIM_MODE ? 'bot_orders_sim' : 'bot_orders';
+module.exports = botConn.model('BotOrder', BotOrderSchema, COLLECTION);

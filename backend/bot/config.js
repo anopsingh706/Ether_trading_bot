@@ -46,6 +46,10 @@ module.exports = {
   SIM_TX_TARGET: num(process.env.BOT_SIM_TX_TARGET, 1000), // progress-display target (number of swaps)
   SIM_MAX_TX:    num(process.env.BOT_SIM_MAX_TX, 0),       // hard-stop after N swaps (0 = off, run until stopped)
   SIM_GAS_UNITS: num(process.env.BOT_SIM_GAS_UNITS, 0),    // override gas units/swap (0 = use QuoterV2 estimate)
+  // ⚠️ FRICTIONLESS mode: fill every swap at the exact signal price — NO LP fee, NO
+  // price impact, NO gas. This is the OLD fee-blind paper model (the "+$950" illusion);
+  // it isolates the strategy's raw timing but is NOT realistic. Off by default.
+  SIM_NO_FEES:   bool(process.env.BOT_SIM_NO_FEES, false),
 
   // ── Price feed (Binance WebSocket) ───────────────────────────────────────────
   WS_SYMBOL:   (process.env.BOT_WS_SYMBOL || 'ethusdt').toLowerCase(),  // ws stream
@@ -96,7 +100,20 @@ module.exports = {
   ATR_FILTER:     bool(process.env.BOT_ATR_FILTER, true),
   ATR_PERIOD:     num(process.env.BOT_ATR_PERIOD, 14),       // candles in the ATR average
   ATR_MIN_PCT:    num(process.env.BOT_ATR_MIN_PCT, 0.12),    // min ATR as % of price to ALLOW entries (below = too quiet → sit out)
-  ATR_ENTRY_MULT: num(process.env.BOT_ATR_ENTRY_MULT, 0),    // >0: entry Δ = max(configured, ATR×mult) → wider triggers when volatile
+  // Adaptive entry/exit trigger: once ATR is warm, the trigger Δ = ATR × mult — fully
+  // REPLACES the fixed BOT_ENTRY_THRESHOLD/BOT_EXIT_THRESHOLD (which only remain as the
+  // fallback while ATR is still warming up). Calm market → smaller Δ; volatile → bigger.
+  // 0 = off (use the fixed $ threshold always, old behaviour).
+  ATR_ENTRY_MULT: num(process.env.BOT_ATR_ENTRY_MULT, 0),    // entry Δ = ATR × mult (once ready)
+  ATR_EXIT_MULT:  num(process.env.BOT_ATR_EXIT_MULT, 0),     // exit Δ  = ATR × mult (once ready), usually tighter than entry
+
+  // ── RSI momentum-confirmation filter (oversold-bounce confirmation for BUYS) ────
+  // Confirms the dip the entry trigger reacted to was a genuine oversold move, not a
+  // random tick already back near/above neutral. Computed from the same Binance kline
+  // stream the volume/ATR filters use (no extra RPC load).
+  RSI_FILTER:     bool(process.env.BOT_RSI_FILTER, false),
+  RSI_PERIOD:     num(process.env.BOT_RSI_PERIOD, 14),       // candles in the RSI average
+  RSI_MAX_ENTRY:  num(process.env.BOT_RSI_MAX_ENTRY, 40),    // only BUY if RSI ≤ this (confirms a real oversold dip)
 
   // ── Trend filter (Option B: "sit in cash" — only BUY in an uptrend) ──────────
   // This is the adaptive downtrend guard (replaced the removed datum-line gate):
