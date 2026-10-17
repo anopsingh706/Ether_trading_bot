@@ -35,7 +35,12 @@ async function main() {
   console.log(`   guards    : minNetProfit=${cfg.MIN_NET_PROFIT} USDC | slippageAlert=${cfg.SLIPPAGE_ALERT_BPS}bps${cfg.SLIPPAGE_HALT ? ' (HALT on)' : ''}`);
   console.log(`   swap safe : minOut slip ${(cfg.SLIPPAGE_TOLERANCE * 100).toFixed(2)}%→${(cfg.SLIPPAGE_MAX * 100).toFixed(2)}% (ATR-adaptive ×${cfg.SLIPPAGE_ATR_MULT}) | revert backoff ${Math.round(cfg.REVERT_BACKOFF_MS / 1000)}s`);
   console.log(`   trend flt : ${cfg.TREND_FILTER ? 'ON' : 'off'} — only buys in an uptrend (MA window ${Math.round(cfg.TREND_WINDOW_MS / 60000)}min)`);
-  if (cfg.EXIT_MODE === 'breakeven') {
+  if (cfg.EXIT_MODE !== 'classic' && cfg.EXIT_MODE !== 'breakeven') {
+    const rule = cfg.EXIT_MODE === 'instant' ? 'sell the moment price < entry'
+      : cfg.EXIT_MODE === 'timestop' ? `sell if still below entry after ${cfg.TIME_STOP_H}h`
+      : `sell when below entry AND trend down for ${Math.round(cfg.REGIME_CONFIRM_MS / 1000)}s`;
+    console.log(`   exits     : ${cfg.EXIT_MODE.toUpperCase()} mode — underwater: ${rule} | trail above BE+${cfg.BE_BUFFER_PCT}% | ε-tol ${cfg.BE_TOLERANCE_PCT}% | disaster stop ${cfg.DISASTER_STOP_PCT > 0 ? cfg.DISASTER_STOP_PCT + '%' : 'off'}`);
+  } else if (cfg.EXIT_MODE === 'breakeven') {
     console.log(`   exits     : BREAK-EVEN mode — no loss exits (hold underwater for BE+${cfg.BE_BUFFER_PCT}%) | trail above BE | ε-tol ${cfg.BE_TOLERANCE_PCT}% | disaster stop ${cfg.DISASTER_STOP_PCT > 0 ? cfg.DISASTER_STOP_PCT + '%' : '⚠️ OFF (unbounded holds)'}`);
     console.log(`   uw-swing  : ${cfg.UW_SWING ? `⚠️ ON — reb $${cfg.SW_REB}/rev $${cfg.SW_REV}, min-drop ${cfg.UW_MIN_DROP_PCT}%, cool ${Math.round(cfg.SW_COOL_MS / 60000)}m, max ${cfg.SW_MAX}/campaign (backtest: net-negative — your call)` : 'off (backtest verdict: hurts — enable with BOT_UW_SWING=true)'}`);
   } else {
@@ -95,7 +100,7 @@ async function main() {
     }
     // show the exit levels while holding: BE floor (breakeven mode) or stop-loss (classic)
     let stopStr = '';
-    if (holding && cfg.EXIT_MODE === 'breakeven' && engine.lastBE != null) {
+    if (holding && cfg.FLOOR_EXIT_MODES.includes(cfg.EXIT_MODE) && engine.lastBE != null) {
       const uw = s.anchorPrice != null && s.anchorPrice < engine.lastBE;
       const uwh = uw && s.entryAt ? ' uw ' + ((Date.now() - new Date(s.entryAt).getTime()) / 3600000).toFixed(1) + 'h' : '';
       stopStr = ` BE≥${fmt(engine.lastBE)}${uw ? '⏳' + uwh : '✓'}${cfg.DISASTER_STOP_PCT > 0 && s.entryPrice ? ' dstop≤' + fmt(s.entryPrice * (1 - cfg.DISASTER_STOP_PCT / 100)) : ''}`;

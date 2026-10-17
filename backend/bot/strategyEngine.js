@@ -40,6 +40,7 @@ class StrategyEngine {
     this.lastBE = null;      // current break-even level (exposed for the status line)
     this._uwLow = null;      // Layer 2: drawdown low since entry/last swing (in-memory)
     this._uwPeak = null;     // Layer 2: rebound peak since the low (in-memory)
+    this._regimeSince = null; // 'regime' exit: when the current underwater downtrend began
     this.ema = null;        // #1: smoothed decision price (EMA); null until first tick
     this._emaTs = 0;
     this.priceHist = [];                                    // rolling {p, ts} for the trend MA
@@ -170,7 +171,7 @@ class StrategyEngine {
   // hard minimum. The ONLY losses this mode realizes: the deep disaster stop, and (with
   // Layer 1) micro-losses within the ε-band. Layer 2 (optional) swing-repairs deep
   // drawdowns so the floor itself ratchets down.
-  async _beExit(p, rawPrice) {
+  async _beExit(p, rawPrice, trend) {
     const s = this.state;
     const be = this.beLevel();
     this.lastBE = be;
@@ -203,7 +204,17 @@ class StrategyEngine {
       return;
     }
 
-    // 3) underwater — HOLD (no loss exits)…
+    // 3) underwater — 'instant' / 'timestop' / 'regime' cut here; 'breakeven' holds.
+    if (cfg.EXIT_MODE !== 'breakeven') {
+      const cut = this._underwaterCut(rawPrice, trend);
+      if (cut) {
+        logger.note(`Underwater cut (${cut.tag}): ${cut.detail} — selling`);
+        await this._act('SELL', p, cut.tag);
+      }
+      return;
+    }
+
+    // 'breakeven' — HOLD (no loss exits)…
     // Layer 2 (optional, ⚠️ backtest net-negative): in a DEEP drawdown, sell a big
     // rebound that reverses, to re-buy the next dip → more ETH on the same basis →
     // beLevel() ratchets down. Gated hard: min-drop, wide deltas, cooldown, cycle cap.
@@ -228,6 +239,43 @@ class StrategyEngine {
       const hrs = s.entryAt ? ((now - new Date(s.entryAt).getTime()) / 3600000).toFixed(1) : '?';
       logger.note(`Underwater ${hrs}h: holding for break-even ${be.toFixed(2)} (price ${rawPrice.toFixed(2)}) — no loss exits in breakeven mode`);
     }
+  }
+
+  // Underwater-cut rule for 'instant' / 'timestop' / 'regime'. "Underwater" = raw price
+  // below the realized entry price (what we actually paid per ETH). Returns {tag, detail}
+  // or null (keep holding).
+  _underwaterCut(rawPrice, trend) {
+    const s = this.state;
+    if (s.entryPrice == null || rawPrice >= s.entryPrice) { this._regimeSince = null; return null; }
+    const lossPct = ((s.entryPrice - rawPrice) / s.entryPrice) * 100;
+    const where = `price ${rawPrice.toFixed(2)} < entry ${s.entryPrice.toFixed(2)} (−${lossPct.toFixed(2)}%)`;
+
+    if (cfg.EXIT_MODE === 'instant') return { tag: 'instant-cut', detail: where };
+
+    if (cfg.EXIT_MODE === 'timestop') {
+      const hrs = s.entryAt ? (Date.now() - new Date(s.entryAt).getTime()) / 3600000 : 0;
+      if (hrs >= cfg.TIME_STOP_H) return { tag: 'time-stop', detail: `${where}, held ${hrs.toFixed(1)}h ≥ ${cfg.TIME_STOP_H}h` };
+      this._underwaterLog(`Underwater ${hrs.toFixed(1)}h: ${where} — time stop at ${cfg.TIME_STOP_H}h`);
+      return null;
+    }
+
+    // 'regime': the trend must be down continuously for REGIME_CONFIRM_MS
+    if (trend.ready && !trend.up) {
+      if (this._regimeSince == null) this._regimeSince = Date.now();
+      const downMs = Date.now() - this._regimeSince;
+      if (downMs >= cfg.REGIME_CONFIRM_MS) {
+        return { tag: 'regime', detail: `${where}, below MA ${trend.ma.toFixed(2)} for ${Math.round(downMs / 1000)}s` };
+      }
+    } else {
+      this._regimeSince = null;
+    }
+    this._underwaterLog(`Underwater: ${where} — holding while the trend is not confirmed down`);
+    return null;
+  }
+
+  _underwaterLog(msg) {
+    const now = Date.now();
+    if (now - this._lastBeLog > 300000) { this._lastBeLog = now; logger.note(msg); }
   }
 
   // Layer 2 sub-state: IN_SWING — campaign open, holding cash after a swing-sell.
@@ -379,9 +427,10 @@ class StrategyEngine {
         return;
       }
 
-      // BREAK-EVEN exit mode replaces protective exits + trailing below BE entirely.
-      if (cfg.EXIT_MODE === 'breakeven') {
-        await this._beExit(p, price);
+      // BREAK-EVEN family (breakeven/instant/timestop/regime) replaces protective exits
+      // + trailing below BE entirely.
+      if (cfg.FLOOR_EXIT_MODES.includes(cfg.EXIT_MODE)) {
+        await this._beExit(p, price, trend);
         return;
       }
 
@@ -441,7 +490,7 @@ class StrategyEngine {
       const updated = await execution.execute(side, this.state, price, reason, atrPct);
       if (updated) {
         this.state = updated;
-        this._uwLow = null; this._uwPeak = null; // position changed → fresh drawdown trackers
+        this._uwLow = null; this._uwPeak = null; this._regimeSince = null; // position changed → fresh drawdown trackers
       }
       if (this.state && this.state.slippageHalt) {
         this.halted = true;

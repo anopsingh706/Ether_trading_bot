@@ -85,13 +85,13 @@ async function fetchKlines(days) {
 }
 
 // ── one replay over the candle series for a given underwater-handling mode ───
-function replay(candles, exitMode) {
+function replay(candles, exitMode, o = {}) {
   const warm = Math.max(P.volWindow, P.atrPeriod, P.trendWin, P.rsiPeriod) + 2;
   let pos = 'CASH', cash = CAPITAL, qty = 0, entryFill = null, entryCost = null, campGas = 0;
-  let anchor = null, entryIdx = 0, maxHoldMin = 0;
+  let anchor = null, entryIdx = 0, maxHoldMin = 0, entryAtr = 0;
   let trades = 0, wins = 0, net = 0, gas = 0, fees = 0;
   let equity = CAPITAL, peakEq = CAPITAL, maxDD = 0;
-  let beLevel = null;
+  let beLevel = null, heldCash = 0, partialDone = false;
   const exits = {};
 
   const volOK = (i) => {
@@ -126,16 +126,16 @@ function replay(candles, exitMode) {
 
   const sell = (level, reason, i) => {
     const fill = level * (1 - COST_LEG);
-    const proceeds = qty * fill - GAS_USD;
+    const proceeds = qty * fill - GAS_USD + heldCash;
     const pnl = proceeds - entryCost;
     fees += qty * level * COST_LEG; gas += GAS_USD;
     net += pnl; trades++; if (pnl >= 0) wins++;
     exits[reason] = (exits[reason] || 0) + 1;
     maxHoldMin = Math.max(maxHoldMin, i - entryIdx);
     cash = proceeds > 0 ? proceeds : 0; qty = 0; pos = 'CASH'; anchor = level;
-    beLevel = null; campGas = 0;
+    beLevel = null; campGas = 0; heldCash = 0; partialDone = false;
   };
-  const recomputeBE = () => { beLevel = ((entryCost + campGas + GAS_USD) / (qty * (1 - COST_LEG))) * (1 + P.beBuffer); };
+  const recomputeBE = () => { beLevel = ((entryCost - heldCash + campGas + GAS_USD) / (qty * (1 - COST_LEG))) * (1 + P.beBuffer); };
 
   for (let i = warm; i < candles.length; i++) {
     const k = candles[i];
@@ -161,7 +161,7 @@ function replay(candles, exitMode) {
           fees += (cash - GAS_USD) * COST_LEG / (1 + COST_LEG); gas += GAS_USD;
           entryFill = fill; entryCost = cash; campGas = GAS_USD;
           recomputeBE();
-          entryIdx = i; anchor = level;
+          entryIdx = i; anchor = level; entryAtr = atrDollar(i);
           cash = 0; pos = 'LONG';
         }
         continue;
@@ -170,6 +170,50 @@ function replay(candles, exitMode) {
       // pos === 'LONG' — anchor tracks the peak since entry (all modes trail the same way above BE)
       if (anchor == null || t > anchor) anchor = t;
       if (P.disasterPct > 0 && ((entryFill - t) / entryFill) * 100 >= P.disasterPct) { sell(t, 'disaster', i); continue; }
+
+      const trailOrBE = () => {
+        if (anchor >= beLevel) {
+          const trail = anchor - exitDelta;
+          if (trail >= beLevel && t <= trail) { sell(trail, 'reversal', i); return true; }
+          if (t <= beLevel) { sell(beLevel, 'breakeven', i); return true; }
+        }
+        return false;
+      };
+
+      if (exitMode === 'timestop') {
+        // hold underwater at most o.hours, then sell at market
+        if (trailOrBE()) continue;
+        if (t < entryFill && (i - entryIdx) / 60 >= o.hours) sell(t, 'time-stop', i);
+        continue;
+      }
+
+      if (exitMode === 'atrstop') {
+        // volatility-scaled stop: entry − k×ATR (ATR frozen at entry)
+        if (trailOrBE()) continue;
+        if (t <= entryFill - o.k * entryAtr) sell(t, 'atr-stop', i);
+        continue;
+      }
+
+      if (exitMode === 'regime') {
+        // underwater AND the last closed candle is below the trend MA → trend has turned
+        if (trailOrBE()) continue;
+        if (t < entryFill && P.trendOn && candles[i - 1].c < ma && i > entryIdx) sell(t, 'regime', i);
+        continue;
+      }
+
+      if (exitMode === 'partial') {
+        // first dip below entry: sell half, hold the rest for breakeven (or disaster)
+        if (!partialDone && t < entryFill) {
+          const half = qty / 2;
+          const fill = t * (1 - COST_LEG);
+          heldCash = half * fill - GAS_USD;
+          fees += half * t * COST_LEG; gas += GAS_USD;
+          qty -= half; partialDone = true; recomputeBE();
+          continue;
+        }
+        trailOrBE();
+        continue;
+      }
 
       if (exitMode === 'instant') {
         // NEW idea: cut the instant price is below what we paid — no patience at all.
@@ -209,18 +253,19 @@ function replay(candles, exitMode) {
       }
     }
 
-    equity = pos === 'LONG' ? qty * k.c : cash;
+    equity = pos === 'LONG' ? qty * k.c + heldCash : cash;
     peakEq = Math.max(peakEq, equity); maxDD = Math.max(maxDD, peakEq - equity);
   }
 
   let stuck = null;
   if (pos !== 'CASH') {
     const last = candles[candles.length - 1].c;
-    equity = qty * last * (1 - COST_LEG);
+    equity = qty * last * (1 - COST_LEG) + heldCash;
     maxHoldMin = Math.max(maxHoldMin, candles.length - 1 - entryIdx);
     stuck = { unrealized: equity - entryCost, sinceH: ((candles.length - 1 - entryIdx) / 60).toFixed(1) };
   }
-  return { trades, wins, net, fees, gas, maxDD, endFlat: pos === 'CASH', maxHoldMin, stuck, exits };
+  const total = net + (stuck ? stuck.unrealized : 0); // realized + open position marked to market
+  return { trades, wins, net, total, fees, gas, maxDD, endFlat: pos === 'CASH', maxHoldMin, stuck, exits };
 }
 
 // ── main ──────────────────────────────────────────────────────────────────────
@@ -237,22 +282,26 @@ function replay(candles, exitMode) {
     const wr = r.trades ? Math.round((r.wins / r.trades) * 100) : 0;
     const hold = r.maxHoldMin >= 60 ? (r.maxHoldMin / 60).toFixed(1) + 'h' : r.maxHoldMin + 'm';
     const stuckStr = r.stuck ? `  ⚠️STUCK ${r.stuck.sinceH}h unreal ${r.stuck.unrealized.toFixed(2)}` : '';
-    return `${label.padEnd(10)} RT ${String(r.trades).padStart(4)}  win ${String(wr).padStart(3)}%  net ${(r.net >= 0 ? '+' : '') + r.net.toFixed(2).padStart(7)}  fees ${r.fees.toFixed(2).padStart(6)}  maxDD ${r.maxDD.toFixed(2).padStart(6)}  maxHold ${hold.padStart(6)}  ${r.endFlat ? 'flat   ' : 'HOLDING'}${stuckStr}  ${JSON.stringify(r.exits)}`;
+    return `${label.padEnd(9)} RT ${String(r.trades).padStart(4)}  win ${String(wr).padStart(3)}%  net ${(r.net >= 0 ? '+' : '') + r.net.toFixed(2).padStart(7)}  fees ${r.fees.toFixed(2).padStart(6)}  maxDD ${r.maxDD.toFixed(2).padStart(6)}  maxHold ${hold.padStart(6)}  ${r.endFlat ? 'flat   ' : 'HOLDING'}${stuckStr}  ${JSON.stringify(r.exits)}`;
   };
 
   console.log('── comparison (identical entries — only underwater handling differs) ──');
-  const modes = ['be', 'instant', 'decay'];
+  const runs = [
+    ['be', 'be'], ['instant', 'instant'], ['decay', 'decay'],
+    ['time-1h', 'timestop', { hours: 1 }], ['time-4h', 'timestop', { hours: 4 }], ['time-12h', 'timestop', { hours: 12 }],
+    ['atr-2x', 'atrstop', { k: 2 }], ['atr-4x', 'atrstop', { k: 4 }], ['atr-8x', 'atrstop', { k: 8 }],
+    ['regime', 'regime'], ['partial', 'partial'],
+  ];
   const results = {};
-  for (const m of modes) {
-    results[m] = replay(candles, m);
-    console.log(fmtRow(m, results[m]));
+  for (const [label, m, o] of runs) {
+    results[label] = replay(candles, m, o);
+    console.log(fmtRow(label, results[label]));
   }
 
-  console.log('\n── ranked by realized net P&L ──');
-  modes
-    .map((m) => ({ m, net: results[m].net }))
-    .sort((a, b) => b.net - a.net)
-    .forEach((x, idx) => console.log(`  ${idx + 1}. ${x.m.padEnd(8)} net ${(x.net >= 0 ? '+' : '') + x.net.toFixed(2)} USDC`));
+  console.log("\n── ranked by TOTAL result (realized + open position at today's price) ──");
+  Object.entries(results)
+    .sort((a, b) => b[1].total - a[1].total)
+    .forEach(([m, r], idx) => console.log(`  ${String(idx + 1).padStart(2)}. ${m.padEnd(9)} total ${(r.total >= 0 ? '+' : '') + r.total.toFixed(2)}  (${(r.total / CAPITAL * 100).toFixed(2)}%)  realized ${r.net.toFixed(2)}`));
 
   process.exit(0);
 })().catch((e) => { console.error('💥', e.message || e); process.exit(1); });

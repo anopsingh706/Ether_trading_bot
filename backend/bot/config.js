@@ -131,7 +131,17 @@ module.exports = {
   //               stop, so a structural crash stays bounded instead of freezing the
   //               bot forever. Backtested 30d crash: 97% green exits, 10 bounded
   //               disasters vs 600+ small cuts in classic.
-  EXIT_MODE:         (process.env.BOT_EXIT_MODE || 'classic'),
+  // Underwater-cut modes — same as 'breakeven' (disaster stop, trail above BE, BE floor)
+  // EXCEPT for what happens while the price is below the entry price:
+  // 'instant'   = sell the moment price < entry price (never sits underwater).
+  // 'timestop'  = hold underwater at most TIME_STOP_H hours, then sell at market.
+  // 'regime'    = sell when price < entry AND the trend MA has turned down, held for
+  //               REGIME_CONFIRM_MS (≈ one closed 1m candle, so one tick can't fire it).
+  // 15d backtests (2026-10-17): all three beat 'breakeven'; regime + timestop-1h were
+  // top-3 in both a falling and a rising window. Absolute P&L there is optimistic.
+  EXIT_MODE:         (process.env.BOT_EXIT_MODE || 'classic').trim().toLowerCase(),
+  TIME_STOP_H:       num(process.env.BOT_TIME_STOP_H, 1),            // 'timestop': max hours underwater
+  REGIME_CONFIRM_MS: num(process.env.BOT_REGIME_CONFIRM_MS, 60000),  // 'regime': downtrend must persist this long
   DISASTER_STOP_PCT: num(process.env.BOT_DISASTER_STOP_PCT, 5),   // % below entry; 0 = off (⚠️ 30d test froze 719h holding −17%)
   BE_BUFFER_PCT:     num(process.env.BOT_BE_BUFFER_PCT, 0.1),     // margin above true breakeven (covers gas + rounding)
 
@@ -224,3 +234,10 @@ module.exports = {
   PERSIST_THROTTLE_MS: num(process.env.BOT_PERSIST_MS, 3000),
   TICK_LOG: bool(process.env.BOT_TICK_LOG, true),
 };
+
+// Exit modes that share the break-even machinery (disaster stop, trail above BE, BE
+// floor) and differ only in how an underwater position is handled.
+module.exports.FLOOR_EXIT_MODES = ['breakeven', 'instant', 'timestop', 'regime'];
+if (![...module.exports.FLOOR_EXIT_MODES, 'classic'].includes(module.exports.EXIT_MODE)) {
+  throw new Error(`BOT_EXIT_MODE="${module.exports.EXIT_MODE}" is not valid — use classic | breakeven | instant | timestop | regime`);
+}
