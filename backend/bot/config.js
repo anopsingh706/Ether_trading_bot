@@ -49,6 +49,9 @@ module.exports = {
   // ⚠️ FRICTIONLESS mode: fill every swap at the exact signal price — NO LP fee, NO
   // price impact, NO gas. This is the OLD fee-blind paper model (the "+$950" illusion);
   // it isolates the strategy's raw timing but is NOT realistic. Off by default.
+  // Parallel sims: each BOT_SIM_ID gets its own state doc + order collection, so e.g.
+  // instant / timestop / regime can run side by side on the same live prices.
+  SIM_ID:        (trim(process.env.BOT_SIM_ID) || '').toLowerCase().replace(/[^a-z0-9_-]/g, ''),
   SIM_NO_FEES:   bool(process.env.BOT_SIM_NO_FEES, false),
 
   // ── Price feed (Binance WebSocket) ───────────────────────────────────────────

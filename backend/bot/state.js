@@ -10,7 +10,7 @@ const BotOrder = require('./models/BotOrder');
 
 // Simulation runs against a SEPARATE state document so it can never read or write
 // the live position. (This is the isolation the old shared-singleton dry-run lacked.)
-const STATE_KEY = cfg.SIM_MODE ? 'sim-singleton' : 'singleton';
+const STATE_KEY = cfg.SIM_MODE ? (cfg.SIM_ID ? `sim-${cfg.SIM_ID}` : 'sim-singleton') : 'singleton';
 
 // Recover the open position's cost basis from the most recent BUY order. Used on
 // resume and when reconciling a desynced position so the next SELL can still

@@ -15,6 +15,25 @@ process.env.BOT_SIM = 'true';
 if (!process.env.BOT_SIM_CAPITAL)   process.env.BOT_SIM_CAPITAL = '1000';
 if (!process.env.BOT_SIM_TX_TARGET) process.env.BOT_SIM_TX_TARGET = '1000';
 
+// ── Live-strategy profile:  node botSimRunner.js --live [--mode instant|timestop|regime|breakeven]
+// Uses YOUR .env strategy (entries, filters, exit settings) with REAL fees, so the result
+// is comparable to the live bot. --mode picks the exit mode AND gives the run its own
+// state + order collection (BOT_SIM_ID), so several modes can run side by side.
+// Ticks come from Binance by default so parallel sims add no RPC load to the live bot
+// (fills are still priced by the real QuoterV2); set BOT_PRICE_SOURCE=uniswap to match live exactly.
+const argv = process.argv.slice(2);
+const LIVE_PROFILE = argv.includes('--live');
+const modeIdx = argv.indexOf('--mode');
+if (modeIdx >= 0 && argv[modeIdx + 1]) {
+  process.env.BOT_EXIT_MODE = argv[modeIdx + 1];
+  if (!process.env.BOT_SIM_ID) process.env.BOT_SIM_ID = argv[modeIdx + 1];
+}
+if (LIVE_PROFILE) {
+  if (!process.env.BOT_SIM_NO_FEES)  process.env.BOT_SIM_NO_FEES = 'false';
+  if (!process.env.BOT_PRICE_SOURCE) process.env.BOT_PRICE_SOURCE = 'binance';
+  if (!process.env.BOT_TICK_LOG)     process.env.BOT_TICK_LOG = 'false'; // don't flood the shared tick log
+}
+
 // ── Test profile: pure raw-tick $0.05/$0.05 trailing reversal, ALL filters OFF ──
 // Pinned here (not in .env) so the live bot (`npm run bot`) is unaffected. These take
 // precedence over .env (dotenv never overrides an already-set var); a real shell env
@@ -37,8 +56,10 @@ const test = {
   BOT_SIM_NO_FEES:     'true',      // fill at signal price: NO LP fee, NO impact, NO gas (the "+$950" model)
   BOT_PRICE_SOURCE:    'binance',   // signal from Binance WS → zero RPC, cannot touch the live bot
 };
-for (const [k, v] of Object.entries(test)) {
-  if (!process.env[k]) process.env[k] = v;
+if (!LIVE_PROFILE) {
+  for (const [k, v] of Object.entries(test)) {
+    if (!process.env[k]) process.env[k] = v;
+  }
 }
 
 if (String(process.env.BOT_SIM_NO_FEES).toLowerCase() === 'true') {

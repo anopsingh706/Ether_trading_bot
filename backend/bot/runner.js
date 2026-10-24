@@ -26,6 +26,7 @@ async function main() {
     console.log(cfg.SIM_NO_FEES
       ? `   sim cost  : ⚠️ NONE — frictionless fill at signal price (NO fee/impact/gas — NOT realistic)`
       : `   sim cost  : real QuoterV2 fill (0.05% LP fee + price impact) + live gas estimate per swap`);
+    if (cfg.SIM_ID) console.log(`   sim run   : "${cfg.SIM_ID}" (own state + orders → compare with: npm run sim:compare)`);
     console.log(`   sim target: ~${cfg.SIM_TX_TARGET} transactions${cfg.SIM_MAX_TX > 0 ? ` (hard stop at ${cfg.SIM_MAX_TX})` : ' (run until stopped)'}`);
   } else {
     console.log('   mode      : ⚠️  LIVE (real funds) — every run trades real money');
