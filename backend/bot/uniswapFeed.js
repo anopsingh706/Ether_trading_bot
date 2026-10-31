@@ -17,7 +17,7 @@ const logger = require('./logger');
 
 const FACTORY_ABI = ['function getPool(address,address,uint24) view returns (address)'];
 const POOL_ABI = [
-  'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)',
+  'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint32 feeProtocol, bool unlocked)',
   'function token0() view returns (address)',
   'function token1() view returns (address)',
   'function liquidity() view returns (uint128)',
@@ -26,7 +26,7 @@ const POOL_ABI = [
 class UniswapFeed extends EventEmitter {
   constructor() {
     super();
-    this.http = new ethers.JsonRpcProvider(cfg.RPC_HTTP);
+    this.http = new ethers.JsonRpcProvider(cfg.RPC_HTTP, cfg.CHAIN_ID, { staticNetwork: true });
     this.wsProvider = null;
     this.pool = null;
     this.poolFee = null;
@@ -59,7 +59,7 @@ class UniswapFeed extends EventEmitter {
     const fee = cfg.POOL_FEE;
     const addr = await factory.getPool(cfg.WETH_ADDRESS, cfg.USDC_ADDRESS, fee);
     if (!addr || addr === ethers.ZeroAddress) {
-      throw new Error(`No Uniswap v3 WETH/USDC.e pool at fee ${fee} (set BOT_POOL_FEE to a tier that exists)`);
+      throw new Error(`No ${cfg.DEX_NAME} WETH/${cfg.USDC_SYMBOL} pool on ${cfg.CHAIN_NAME} at fee ${fee} (set the pool-fee env to a tier that exists)`);
     }
     const pool = new ethers.Contract(addr, POOL_ABI, this.http);
     let liq = 0n;
@@ -68,7 +68,7 @@ class UniswapFeed extends EventEmitter {
     this.poolFee = fee;
     const t0 = (await pool.token0()).toLowerCase();
     this.wethIsToken0 = t0 === cfg.WETH_ADDRESS.toLowerCase();
-    console.log(`🦄 [uniswap] pool ${addr} (fee ${fee}, WETH = token${this.wethIsToken0 ? '0' : '1'}, liquidity ${liq.toString()})`);
+    console.log(`🦄 [${cfg.DEX_NAME} ${cfg.CHAIN_NAME}] pool ${addr} (fee ${fee}, WETH = token${this.wethIsToken0 ? '0' : '1'}, liquidity ${liq.toString()})`);
     if (liq === 0n) console.warn('⚠️ [uniswap] pool liquidity reads 0 — check BOT_POOL_FEE');
   }
 
@@ -103,7 +103,7 @@ class UniswapFeed extends EventEmitter {
       const b = await axios.get(`https://api.binance.com/api/v3/ticker/price?symbol=${cfg.REST_SYMBOL}`, { timeout: 8000 });
       const bp = parseFloat(b.data && b.data.price);
       const diff = this.lastPrice && bp ? ((this.lastPrice - bp) / bp) * 100 : null;
-      console.log(`🔎 [uniswap] sanity: Uniswap ${this.lastPrice ? this.lastPrice.toFixed(2) : '—'} vs Binance ${bp ? bp.toFixed(2) : '—'} (${diff != null ? diff.toFixed(3) : '—'}% diff)`);
+      console.log(`🔎 [pool] sanity: ${cfg.DEX_NAME} ${this.lastPrice ? this.lastPrice.toFixed(2) : '—'} vs Binance ${bp ? bp.toFixed(2) : '—'} (${diff != null ? diff.toFixed(3) : '—'}% diff)`);
     } catch (_) {}
 
     // BASELINE: reliable HTTPS polling so the feed can never get stuck.

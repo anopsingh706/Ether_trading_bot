@@ -1,29 +1,31 @@
 // bot/dex.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Real swaps on Uniswap v3 (Polygon) via SwapRouter02, with QuoterV2 quoting and
+// Real swaps on the chain's Uniswap-v3-style DEX (Uniswap v3 on Polygon, PancakeSwap
+// v3 on Base — see BOT_CHAIN) via a router-02 exactInputSingle, with QuoterV2 quoting and
 // REAL min-output slippage protection (amountOutMinimum). Every step is logged so
 // the transaction flow is visible on the console (approve → quote → submit →
-// confirm → gas), with Polygonscan links.
+// confirm → gas), with block-explorer links.
 //
-//   BUY  = USDC.e → WETH      SELL = WETH → USDC.e
+//   BUY  = USDC → WETH      SELL = WETH → USDC
 // ─────────────────────────────────────────────────────────────────────────────
 const { ethers } = require('ethers');
 const axios = require('axios');
 const cfg = require('./config');
 const logger = require('./logger');
 
-// Live POL/USD for accurate gas-cost display (cached 10 min; falls back to config).
-let _polCache = { price: cfg.POL_PRICE_USD, ts: 0 };
-async function polPriceUSD() {
-  if (Date.now() - _polCache.ts < 600000) return _polCache.price;
-  for (const sym of ['POLUSDT', 'MATICUSDT']) {
+// Live native-gas-token/USD (POL on Polygon, ETH on Base) for accurate gas costing
+// (cached 10 min; falls back to config).
+let _nativeCache = { price: cfg.NATIVE_PRICE_FALLBACK, ts: 0 };
+async function nativePriceUSD() {
+  if (Date.now() - _nativeCache.ts < 600000) return _nativeCache.price;
+  for (const sym of cfg.NATIVE_TICKERS) {
     try {
       const r = await axios.get(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`, { timeout: 6000 });
       const p = parseFloat(r.data && r.data.price);
-      if (p > 0) { _polCache = { price: p, ts: Date.now() }; return p; }
+      if (p > 0) { _nativeCache = { price: p, ts: Date.now() }; return p; }
     } catch (_) { /* try next symbol / fallback */ }
   }
-  return _polCache.price;
+  return _nativeCache.price;
 }
 
 // SwapRouter02 (no per-call deadline in the struct)
@@ -40,11 +42,11 @@ const ERC20_ABI = [
   'function balanceOf(address) view returns (uint256)',
 ];
 
-const SCAN = 'https://polygonscan.com/tx/';
+const SCAN = cfg.SCAN_TX_URL;
 
 class Dex {
   constructor() {
-    this.provider = new ethers.JsonRpcProvider(cfg.RPC_HTTP);
+    this.provider = new ethers.JsonRpcProvider(cfg.RPC_HTTP, cfg.CHAIN_ID, { staticNetwork: true });
     const pk = (process.env.PRIVATE_KEY || '').trim();
     this.wallet = new ethers.Wallet(pk.startsWith('0x') ? pk : '0x' + pk, this.provider);
     this.router = new ethers.Contract(cfg.UNISWAP_ROUTER, ROUTER_ABI, this.wallet);
@@ -56,12 +58,12 @@ class Dex {
   get address() { return this.wallet.address; }
 
   async balances() {
-    const [pol, usdc, weth] = await Promise.all([
+    const [native, usdc, weth] = await Promise.all([
       this.provider.getBalance(this.wallet.address),
       this.usdc.balanceOf(this.wallet.address),
       this.weth.balanceOf(this.wallet.address),
     ]);
-    return { pol, usdc, weth };
+    return { native, usdc, weth }; // native = gas token (POL / ETH)
   }
 
   async quoteExactIn(tokenIn, tokenOut, amountIn) {
@@ -73,18 +75,23 @@ class Dex {
   async _ensureAllowance(token, amountIn, sym) {
     const cur = await token.allowance(this.wallet.address, cfg.UNISWAP_ROUTER);
     if (cur >= amountIn) return;
-    logger.line(`🔑 [dex] approving ${sym} for Uniswap router (one-time)…`);
+    logger.line(`🔑 [dex] approving ${sym} for the ${cfg.DEX_NAME} router (one-time)…`);
     const tx = await token.approve(cfg.UNISWAP_ROUTER, ethers.MaxUint256);
     logger.line(`   approve tx: ${tx.hash}  →  ${SCAN}${tx.hash}`);
     await tx.wait();
     logger.line('   ✅ approval confirmed');
   }
 
-  _gasUSD(receipt, polUsd) {
+  // Execution gas + (on OP-stack chains like Base) the L1 data fee, which the
+  // receipt reports separately as l1Fee — ethers' receipt object doesn't expose it.
+  async _gasUSD(receipt, nativeUsd) {
     try {
-      const price = receipt.gasPrice ?? 0n;
-      const pol = parseFloat(ethers.formatEther(receipt.gasUsed * price));
-      return parseFloat((pol * polUsd).toFixed(6));
+      let wei = receipt.gasUsed * (receipt.gasPrice ?? 0n);
+      if (cfg.L1_FEE_ORACLE) {
+        const raw = await this.provider.send('eth_getTransactionReceipt', [receipt.hash]).catch(() => null);
+        if (raw && raw.l1Fee) wei += BigInt(raw.l1Fee);
+      }
+      return parseFloat((parseFloat(ethers.formatEther(wei)) * nativeUsd).toFixed(6));
     } catch { return 0; }
   }
 
@@ -97,10 +104,10 @@ class Dex {
     const tokenInC = isBuy ? this.usdc : this.weth;
     const inDec = isBuy ? cfg.USDT_DECIMALS : cfg.WETH_DECIMALS;
     const outDec = isBuy ? cfg.WETH_DECIMALS : cfg.USDT_DECIMALS;
-    const inSym = isBuy ? 'USDC.e' : 'WETH';
-    const outSym = isBuy ? 'WETH' : 'USDC.e';
+    const inSym = isBuy ? cfg.USDC_SYMBOL : 'WETH';
+    const outSym = isBuy ? 'WETH' : cfg.USDC_SYMBOL;
 
-    logger.line(`\n🔄 [dex] ${side}: ${ethers.formatUnits(amountIn, inDec)} ${inSym} → ${outSym}  (Uniswap fee ${cfg.POOL_FEE})`);
+    logger.line(`\n🔄 [dex] ${side}: ${ethers.formatUnits(amountIn, inDec)} ${inSym} → ${outSym}  (${cfg.DEX_NAME} ${cfg.CHAIN_NAME}, fee ${cfg.POOL_FEE})`);
 
     // 1) quote + min-output (slippage protection)
     const quoted = await this.quoteExactIn(tokenIn, tokenOut, amountIn);
@@ -119,7 +126,7 @@ class Dex {
     const tx = await this.router.exactInputSingle(params);
     logger.line(`   swap tx: ${tx.hash}  →  ${SCAN}${tx.hash}`);
     const receipt = await tx.wait();
-    const gas = this._gasUSD(receipt, await polPriceUSD());
+    const gas = await this._gasUSD(receipt, await nativePriceUSD());
     const ok = receipt.status === 1;
     logger.line(`   ${ok ? '✅ confirmed' : '❌ reverted'} in block ${receipt.blockNumber} | gas ~$${gas}`);
     return { success: ok, txHash: tx.hash, gasCostUSD: gas };

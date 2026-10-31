@@ -33,28 +33,34 @@ const QUOTER_ABI = [
   'function quoteExactInputSingle((address tokenIn,address tokenOut,uint256 amountIn,uint24 fee,uint160 sqrtPriceLimitX96)) returns (uint256 amountOut,uint160 sqrtPriceX96After,uint32 initializedTicksCrossed,uint256 gasEstimate)',
 ];
 
+// OP-stack GasPriceOracle (Base): upper bound of the L1 data fee for a tx of N bytes.
+const L1_ORACLE_ABI = ['function getL1FeeUpperBound(uint256) view returns (uint256)'];
+const SWAP_TX_BYTES = 300; // a signed exactInputSingle tx is ~250-300 bytes
+
 // Read-only context (provider + quoter). No signer → cannot send a transaction.
 let _ctx = null;
 function ctx() {
   if (_ctx) return _ctx;
-  const provider = new ethers.JsonRpcProvider(cfg.RPC_HTTP);
+  const provider = new ethers.JsonRpcProvider(cfg.RPC_HTTP, cfg.CHAIN_ID, { staticNetwork: true });
   const quoter = new ethers.Contract(cfg.UNISWAP_QUOTER, QUOTER_ABI, provider);
-  _ctx = { provider, quoter };
+  const l1Oracle = cfg.L1_FEE_ORACLE ? new ethers.Contract(cfg.L1_FEE_ORACLE, L1_ORACLE_ABI, provider) : null;
+  _ctx = { provider, quoter, l1Oracle };
   return _ctx;
 }
 
-// Live POL/USD for realistic gas costing (cached 10 min; falls back to config).
-let _pol = { price: cfg.POL_PRICE_USD, ts: 0 };
-async function polPriceUSD() {
-  if (Date.now() - _pol.ts < 600000) return _pol.price;
-  for (const sym of ['POLUSDT', 'MATICUSDT']) {
+// Live native-gas-token/USD (POL on Polygon, ETH on Base) for accurate gas costing
+// (cached 10 min; falls back to config).
+let _native = { price: cfg.NATIVE_PRICE_FALLBACK, ts: 0 };
+async function nativePriceUSD() {
+  if (Date.now() - _native.ts < 600000) return _native.price;
+  for (const sym of cfg.NATIVE_TICKERS) {
     try {
       const r = await axios.get(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`, { timeout: 6000 });
       const p = parseFloat(r.data && r.data.price);
-      if (p > 0) { _pol = { price: p, ts: Date.now() }; return p; }
+      if (p > 0) { _native = { price: p, ts: Date.now() }; return p; }
     } catch (_) { /* try next symbol / fallback */ }
   }
-  return _pol.price;
+  return _native.price;
 }
 
 async function quote(tokenIn, tokenOut, amountIn) {
@@ -64,15 +70,20 @@ async function quote(tokenIn, tokenOut, amountIn) {
   return { amountOut: res[0], gasEstimate: res[3] };
 }
 
+// On an RPC hiccup, reuse the last good gas cost instead of booking a free ($0) swap.
+let _lastGasUsd = 0;
 async function gasUSD(gasEstimate) {
   try {
-    const { provider } = ctx();
+    const { provider, l1Oracle } = ctx();
     const fd = await provider.getFeeData();
     const gasPrice = fd.gasPrice ?? fd.maxFeePerGas ?? 0n;
     const units = cfg.SIM_GAS_UNITS > 0 ? BigInt(cfg.SIM_GAS_UNITS) : (gasEstimate || 0n);
-    const pol = parseFloat(ethers.formatEther(units * gasPrice));
-    return parseFloat((pol * (await polPriceUSD())).toFixed(6));
-  } catch { return 0; }
+    let wei = units * gasPrice;
+    if (l1Oracle) wei += await l1Oracle.getL1FeeUpperBound(SWAP_TX_BYTES).catch(() => 0n); // Base L1 data fee
+    const native = parseFloat(ethers.formatEther(wei));
+    _lastGasUsd = parseFloat((native * (await nativePriceUSD())).toFixed(6));
+    return _lastGasUsd;
+  } catch { return _lastGasUsd; }
 }
 
 async function execSim(side, s, price, reason) {
@@ -138,4 +149,4 @@ async function execSim(side, s, price, reason) {
   return finalize('SELL', s, price, extreme, proceeds, quantity, realized, { sim: true, gas, tx: null, reason });
 }
 
-module.exports = { execSim };
+module.exports = { execSim, gasUSD };

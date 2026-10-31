@@ -472,7 +472,17 @@ class StrategyEngine {
     this.busy = true;
 
     // Persistent cross-process lock: refuse to trade if another instance is mid-swap.
-    const locked = await state.acquireLock();
+    // A DB outage here must NOT leave busy=true — that silently froze the engine (every
+    // later tick returned early) after a Mongo disconnect. Retry shortly instead.
+    let locked;
+    try {
+      locked = await state.acquireLock();
+    } catch (e) {
+      this.busy = false;
+      this._revertUntil = Date.now() + 10000; // no swap was sent → short pause, not the 60s gas backoff
+      logger.warn(`[engine] trade lock unavailable (DB: ${(e.message || e).toString().slice(0, 120)}) — skipping, retry in 10s`);
+      return;
+    }
     if (!locked) {
       this.busy = false;
       const now = Date.now();
@@ -500,7 +510,8 @@ class StrategyEngine {
       this._revertUntil = Date.now() + cfg.REVERT_BACKOFF_MS;
       logger.warn(`[engine] execution error (backing off ${Math.round(cfg.REVERT_BACKOFF_MS / 1000)}s): ` + (e.message || e).toString().slice(0, 300));
     } finally {
-      await state.releaseLock();
+      // the lock self-expires after 2 min, so a failed release is safe to just log
+      await state.releaseLock().catch((e) => logger.warn('[engine] lock release failed (expires in 2 min): ' + (e.message || e).toString().slice(0, 120)));
       this.busy = false;
     }
   }

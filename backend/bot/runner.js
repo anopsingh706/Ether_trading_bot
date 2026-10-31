@@ -53,7 +53,8 @@ async function main() {
   console.log(`   atr trig  : entry ${cfg.ATR_ENTRY_MULT > 0 ? 'ATR×' + cfg.ATR_ENTRY_MULT + ' (replaces fixed $ once warm)' : 'off (fixed $ threshold)'} | exit ${cfg.ATR_EXIT_MULT > 0 ? 'ATR×' + cfg.ATR_EXIT_MULT : 'off (fixed $ threshold)'}`);
   console.log(`   rsi filt  : ${cfg.RSI_FILTER ? 'ON — buy only if RSI ≤ ' + cfg.RSI_MAX_ENTRY + ' (period ' + cfg.RSI_PERIOD + ', confirms a real oversold dip)' : 'off'}`);
   console.log(`   db        : ${botConn.name}`);
-  console.log(`   price src : ${cfg.PRICE_SOURCE === 'uniswap' ? 'Uniswap v3 pool (Polygon, on-chain)' : 'Binance ' + cfg.WS_SYMBOL}`);
+  console.log(`   chain     : ${cfg.CHAIN_NAME} — ${cfg.DEX_NAME} WETH/${cfg.USDC_SYMBOL} fee ${cfg.POOL_FEE} (${cfg.POOL_FEE / 1e4}%) | gas in ${cfg.NATIVE_SYMBOL}${cfg.L1_FEE_ORACLE ? ' + L1 data fee' : ''} | rpc ${/infura|alchemy/.test(cfg.RPC_HTTP || '') ? 'private' : (cfg.RPC_HTTP || '—')}`);
+  console.log(`   price src : ${cfg.PRICE_SOURCE === 'uniswap' ? `${cfg.DEX_NAME} pool (${cfg.CHAIN_NAME}, on-chain)` : 'Binance ' + cfg.WS_SYMBOL}`);
   console.log('────────────────────────────────────────────────────────────');
 
   const feed = cfg.PRICE_SOURCE === 'uniswap' ? new UniswapFeed() : new PriceFeed();

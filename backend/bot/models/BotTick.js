@@ -5,6 +5,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 const { Schema } = require('mongoose');
 const botConn = require('../db');
+const cfg = require('../config');
 
 const BotTickSchema = new Schema({
   symbol:     { type: String },
@@ -13,4 +14,4 @@ const BotTickSchema = new Schema({
   created_at: { type: Date, default: Date.now, index: true },
 });
 
-module.exports = botConn.model('BotTick', BotTickSchema, 'bot_ticks');
+module.exports = botConn.model('BotTick', BotTickSchema, 'bot_ticks' + cfg.CHAIN_SUFFIX.replace('-', '_')); // per chain

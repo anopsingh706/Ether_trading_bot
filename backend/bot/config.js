@@ -23,11 +23,48 @@ function deriveBotDbUrl() {
   return base.replace(/\/([^/?]+)(\?|$)/, '/jan25au_botsim$2');
 }
 
-// Derive a WSS RPC url from the HTTPS one (Infura): https://…/v3/KEY → wss://…/ws/v3/KEY
+// ── Chain presets (BOT_CHAIN) ─────────────────────────────────────────────────
+// Everything chain-specific lives here, so switching chain is ONE env line. Both
+// DEXes are Uniswap-v3-style (same factory/pool/QuoterV2/router-02 interfaces).
+// Base addresses verified on-chain 2026-10-24 (factory.getPool(WETH,USDC,100) =
+// 0x72ab…2d38, QuoterV2 quote = mid × 1.0001, router has exactInputSingle 0x04e45aaf).
+const CHAIN = (trim(process.env.BOT_CHAIN) || 'polygon').toLowerCase();
+const CHAINS = {
+  polygon: {
+    chainId: 137, name: 'Polygon', dex: 'Uniswap v3',
+    rpc: trim(process.env.POLYGON_RPC_URL), wss: trim(process.env.POLYGON_WSS_URL),
+    // Polygon keeps reading the legacy env names so existing .env files work unchanged.
+    weth: trim(process.env.WETH_TOKEN_ADDRESS), usdc: trim(process.env.USDT_TOKEN_ADDRESS), usdcSymbol: 'USDC.e',
+    poolFee: num(process.env.BOT_POOL_FEE, 500),
+    factory: trim(process.env.UNISWAP_V3_FACTORY) || '0x1F98431c8aD98523631AE4a59f267346ea31F984',
+    router:  trim(process.env.UNISWAP_ROUTER)     || '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45', // SwapRouter02
+    quoter:  trim(process.env.UNISWAP_QUOTER)     || '0x61fFE014bA17989E743c5F6cB21bF9697530B21e', // QuoterV2
+    native: 'POL', nativeTickers: ['POLUSDT', 'MATICUSDT'], nativeFallbackUsd: num(process.env.BOT_POL_PRICE_USD, 0.08),
+    scan: 'https://polygonscan.com/tx/', l1FeeOracle: null, suffix: '',
+  },
+  base: {
+    chainId: 8453, name: 'Base', dex: 'PancakeSwap v3',
+    rpc: trim(process.env.BASE_RPC_URL) || 'https://mainnet.base.org', wss: trim(process.env.BASE_WSS_URL),
+    weth: '0x4200000000000000000000000000000000000006', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', usdcSymbol: 'USDC',
+    poolFee: num(process.env.BOT_BASE_POOL_FEE, 100),                       // 0.01% tier (~$4.5M TVL)
+    factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865',                  // PancakeV3Factory
+    router:  '0x678Aa4bF4E210cf2166753e054d5b7c31cc7fa86',                  // SmartRouter (router-02 interface)
+    quoter:  '0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997',                  // QuoterV2
+    native: 'ETH', nativeTickers: ['ETHUSDT'], nativeFallbackUsd: 2400,
+    scan: 'https://basescan.org/tx/',
+    l1FeeOracle: '0x420000000000000000000000000000000000000F',              // OP-stack GasPriceOracle (L1 data fee)
+    suffix: '-base',                                                        // separate state / orders / ticks per chain
+  },
+};
+if (!CHAINS[CHAIN]) throw new Error(`BOT_CHAIN="${CHAIN}" is not valid — use polygon | base`);
+const C = CHAINS[CHAIN];
+
+// WSS endpoint: explicit env, else derived from an Infura/Alchemy HTTPS url
+// (Infura: https://…/v3/KEY → wss://…/ws/v3/KEY; Alchemy: same path over wss). Public RPCs → none.
 function deriveWss() {
-  if (process.env.POLYGON_WSS_URL) return process.env.POLYGON_WSS_URL.trim();
-  const http = trim(process.env.POLYGON_RPC_URL) || '';
-  if (!http.startsWith('https://')) return null;
+  if (C.wss) return C.wss;
+  const http = C.rpc || '';
+  if (!/infura\.io|alchemy\.com/.test(http)) return null;
   return http.replace(/^https:\/\//, 'wss://').replace('/v3/', '/ws/v3/');
 }
 
@@ -211,26 +248,30 @@ module.exports = {
   EXIT_RETRY_DELAY_MS: num(process.env.BOT_EXIT_RETRY_DELAY_MS, 3000),// gap between escalating exit retries
 
   // ── Tokens / chain ───────────────────────────────────────────────────────────
-  WETH_ADDRESS: trim(process.env.WETH_TOKEN_ADDRESS),
-  USDT_ADDRESS: trim(process.env.USDT_TOKEN_ADDRESS),   // NOTE: this is actually USDC.e on Polygon
-  USDC_ADDRESS: trim(process.env.USDT_TOKEN_ADDRESS),   // USDC.e (0x2791…) — what the wallet holds
+  CHAIN, CHAIN_ID: C.chainId, CHAIN_NAME: C.name, DEX_NAME: C.dex,
+  CHAIN_SUFFIX: C.suffix,                               // '' on Polygon (legacy names), '-base' on Base
+  NATIVE_SYMBOL: C.native, NATIVE_TICKERS: C.nativeTickers, NATIVE_PRICE_FALLBACK: C.nativeFallbackUsd,
+  SCAN_TX_URL: C.scan, L1_FEE_ORACLE: C.l1FeeOracle,
+  WETH_ADDRESS: C.weth,
+  USDT_ADDRESS: C.usdc,                                 // NOTE: on Polygon this is actually USDC.e
+  USDC_ADDRESS: C.usdc,                                 // what the wallet holds (USDC.e on Polygon, native USDC on Base)
+  USDC_SYMBOL: C.usdcSymbol,
   ADMIN_WALLET: trim(process.env.ADMIN_WALLET_ADDRESS),
   USDT_DECIMALS: 6,
   WETH_DECIMALS: 18,
 
-  // ── Price source & Uniswap (Polygon) ─────────────────────────────────────────
-  PRICE_SOURCE: (process.env.BOT_PRICE_SOURCE || 'uniswap'),   // 'uniswap' | 'binance'
-  RPC_HTTP: trim(process.env.POLYGON_RPC_URL),
+  // ── Price source & DEX (per BOT_CHAIN) ───────────────────────────────────────
+  PRICE_SOURCE: (process.env.BOT_PRICE_SOURCE || 'uniswap'),   // 'uniswap' (= the chain's DEX pool) | 'binance'
+  RPC_HTTP: C.rpc,
   RPC_WSS:  deriveWss(),                                       // websocket node connection (best-effort)
   USE_WSS:  bool(process.env.BOT_USE_WSS, true),               // subscribe to new blocks over WSS
   BLOCK_POLL_MS:    num(process.env.BOT_BLOCK_POLL_MS, 2500),     // reliable polling baseline (ms)
   FEED_MIN_READ_MS: num(process.env.BOT_FEED_MIN_READ_MS, 4000),  // hard cap on pool-read rate → cuts Infura RPC load
-  POOL_FEE: num(process.env.BOT_POOL_FEE, 500),               // 0.05% tier (auto-falls back if illiquid)
-  UNISWAP_V3_FACTORY: trim(process.env.UNISWAP_V3_FACTORY) || '0x1F98431c8aD98523631AE4a59f267346ea31F984',
-  UNISWAP_ROUTER:     trim(process.env.UNISWAP_ROUTER)     || '0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45', // SwapRouter02 (live, next phase)
-  UNISWAP_QUOTER:     trim(process.env.UNISWAP_QUOTER)     || '0x61fFE014bA17989E743c5F6cB21bF9697530B21e', // QuoterV2
+  POOL_FEE: C.poolFee,                                         // Polygon 500 (0.05%) | Base 100 (0.01%)
+  UNISWAP_V3_FACTORY: C.factory,                               // (names kept: both DEXes are Uniswap-v3-style)
+  UNISWAP_ROUTER:     C.router,
+  UNISWAP_QUOTER:     C.quoter,
   SLIPPAGE_TOLERANCE: num(process.env.BOT_SLIPPAGE_TOLERANCE, 0.005),  // 0.5% min-output protection on live swaps
-  POL_PRICE_USD:      num(process.env.BOT_POL_PRICE_USD, 0.08),         // FALLBACK POL/USD only (live price fetched from Binance at runtime)
 
   // ── Misc ─────────────────────────────────────────────────────────────────────
   // Throttle for writing the moving anchor + tick log to the DB (ms).

@@ -28,6 +28,10 @@ if (modeIdx >= 0 && argv[modeIdx + 1]) {
   process.env.BOT_EXIT_MODE = argv[modeIdx + 1];
   if (!process.env.BOT_SIM_ID) process.env.BOT_SIM_ID = argv[modeIdx + 1];
 }
+// --chain base|polygon: which chain's pool prices the virtual fills. A non-Polygon chain
+// gets its own sim id suffix automatically (state key + collections end in '-base').
+const chainIdx = argv.indexOf('--chain');
+if (chainIdx >= 0 && argv[chainIdx + 1]) process.env.BOT_CHAIN = argv[chainIdx + 1];
 if (LIVE_PROFILE) {
   if (!process.env.BOT_SIM_NO_FEES)  process.env.BOT_SIM_NO_FEES = 'false';
   if (!process.env.BOT_PRICE_SOURCE) process.env.BOT_PRICE_SOURCE = 'binance';

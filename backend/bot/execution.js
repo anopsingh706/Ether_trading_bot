@@ -160,7 +160,7 @@ async function finalize(side, s, price, extreme, amount, quantity, realized, met
   return s;
 }
 
-// ── LIVE (real Uniswap v3 swaps via SwapRouter02) ────────────────────────────
+// ── LIVE (real swaps on the chain's v3 DEX via router-02) ────────────────────────────
 async function execLive(side, s, price, reason, atrPct) {
   const extreme = s.anchorPrice;
   const dex = getDex();
@@ -180,13 +180,13 @@ async function execLive(side, s, price, reason, atrPct) {
       await state.reconcileToWeth(s); await state.saveAfterTrade(s);
       logger.warn('No USDC to buy but wallet holds WETH. Position reconciled to IN_WETH.');
     } else {
-      logger.warn('Cannot ENTER — wallet has no USDC.e and no WETH.');
+      logger.warn(`Cannot ENTER — wallet has no ${cfg.USDC_SYMBOL} and no WETH.`);
     }
     return null;
   }
 
   if (side === 'BUY') {
-    if (before.pol <= 0n) { logger.warn('Cannot ENTER — no POL in wallet for gas'); return null; }
+    if (before.native <= 0n) { logger.warn(`Cannot ENTER — no ${cfg.NATIVE_SYMBOL} in wallet for gas`); return null; }
 
     const res = await dex.swap('BUY', before.usdc, tol); // spend all USDC.e → WETH
     if (!res.success) { logger.warn('BUY swap failed/reverted'); return null; }
@@ -198,7 +198,7 @@ async function execLive(side, s, price, reason, atrPct) {
     const realized = quantity > 0 ? amount / quantity : price;
     return finalize('BUY', s, price, extreme, amount, quantity, realized, { dry: false, gas: res.gasCostUSD, tx: res.txHash, reason });
   } else {
-    if (before.pol <= 0n) { logger.warn('Cannot EXIT — no POL in wallet for gas'); return null; }
+    if (before.native <= 0n) { logger.warn(`Cannot EXIT — no ${cfg.NATIVE_SYMBOL} in wallet for gas`); return null; }
 
     // EXIT-COMPLETION RETRY (asymmetric): a SELL must LAND. Retrying with the same tight
     // minOut just reverts again while price falls (the chase-down that dumped 1798→1766).
@@ -265,7 +265,7 @@ async function execSwingSell(s, price, atrPct) {
     logger.warn('swing-sell: no WETH in wallet — reconciled to IN_USDT.');
     return null;
   }
-  if (before.pol <= 0n) { logger.warn('swing-sell blocked — no POL for gas'); return null; }
+  if (before.native <= 0n) { logger.warn(`swing-sell blocked — no ${cfg.NATIVE_SYMBOL} for gas`); return null; }
 
   const res = await dex.swap('SELL', before.weth, slippageTol(atrPct));
   if (!res.success) { logger.warn('swing-sell swap failed/reverted'); return null; }
@@ -297,10 +297,10 @@ async function execSwingBuy(s, price, atrPct, reason) {
   const before = await dex.balances();
   if (before.usdc <= USDC_DUST) {
     if (before.weth > WETH_DUST) { await state.reconcileToWeth(s); await state.saveAfterTrade(s); logger.warn('swing-buy: wallet already holds WETH — reconciled to IN_WETH.'); }
-    else logger.warn('swing-buy blocked — wallet has no USDC.e');
+    else logger.warn(`swing-buy blocked — wallet has no ${cfg.USDC_SYMBOL}`);
     return null;
   }
-  if (before.pol <= 0n) { logger.warn('swing-buy blocked — no POL for gas'); return null; }
+  if (before.native <= 0n) { logger.warn(`swing-buy blocked — no ${cfg.NATIVE_SYMBOL} for gas`); return null; }
 
   const res = await dex.swap('BUY', before.usdc, slippageTol(atrPct));
   if (!res.success) { logger.warn('swing-buy swap failed/reverted'); return null; }
