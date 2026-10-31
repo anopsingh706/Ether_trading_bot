@@ -82,7 +82,8 @@ sudo -u "${BOT_USER}" bash -c "cd '${APP_DIR}/backend' && npm ci --omit=dev"
 
 echo "== 8/9 pm2: start on boot + log rotation"
 env PATH="$PATH:/usr/bin" pm2 startup systemd -u "${BOT_USER}" --hp "/home/${BOT_USER}" >/dev/null
-sudo -u "${BOT_USER}" -H bash -c "pm2 install pm2-logrotate >/dev/null && pm2 set pm2-logrotate:max_size 20M >/dev/null && pm2 set pm2-logrotate:retain 10 >/dev/null"
+# cd ~ first: run from /root (not readable by the bot user) node's spawn fails with EACCES
+sudo -u "${BOT_USER}" -H bash -c "cd ~ && pm2 install pm2-logrotate >/dev/null && pm2 set pm2-logrotate:max_size 20M >/dev/null && pm2 set pm2-logrotate:retain 10 >/dev/null"
 
 echo "== 9/9 checks"
 code=$(curl -s -o /dev/null -w '%{http_code}' https://api.binance.com/api/v3/ping || true)
