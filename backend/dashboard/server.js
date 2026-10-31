@@ -78,7 +78,9 @@ function recordFail(ip) { const f = fails.get(ip); if (!f || Date.now() - f.firs
 // ── helpers ───────────────────────────────────────────────────────────────────
 const SEC_HEADERS = {
   'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'",
-  'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'Cache-Control': 'no-store',
+  // 'same-origin' (not 'no-referrer'): with no-referrer browsers send "Origin: null" on
+  // form posts, which made the login form fail the origin check below.
+  'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'DENY', 'Cache-Control': 'no-store',
 };
 function send(res, code, body, type = 'text/html; charset=utf-8', extra = {}) {
   res.writeHead(code, { ...SEC_HEADERS, 'Content-Type': type, ...extra });
@@ -93,7 +95,14 @@ function readBody(req, max = 4096) {
     req.on('error', reject);
   });
 }
-const sameOrigin = (req) => { const o = req.headers.origin; return !o || o === `https://${req.headers.host}` || o === `http://${req.headers.host}`; };
+// A request is accepted only if the browser says it came from this same site:
+// Sec-Fetch-Site (set by the browser, can't be forged by another site) or a matching Origin.
+function sameOrigin(req) {
+  const site = req.headers['sec-fetch-site'];
+  if (site) return site === 'same-origin' || site === 'none';   // 'none' = typed URL / bookmark
+  const o = req.headers.origin;
+  return !o || o === `https://${req.headers.host}` || o === `http://${req.headers.host}`;
+}
 const PUB = path.join(__dirname, 'public');
 const file = (n) => fs.readFileSync(path.join(PUB, n));
 
