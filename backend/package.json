@@ -1,6 +1,6 @@
 {
   "name": "backend",
-  "version": "4.0.1",
+  "version": "4.1.0",
   "description": "Eather WETH/USDC trading bot (Uniswap v3, Polygon)",
   "main": "botRunner.js",
   "scripts": {
@@ -18,7 +18,10 @@
     "sim:base:instant": "node botSimRunner.js --live --chain base --mode instant",
     "sim:base:timestop": "node botSimRunner.js --live --chain base --mode timestop",
     "sim:base:regime": "node botSimRunner.js --live --chain base --mode regime",
-    "deploy:env": "node deploy/make-server-env.js"
+    "deploy:env": "node deploy/make-server-env.js",
+    "cb:reset": "node bot/cbReset.js",
+    "dashboard": "node dashboard/server.js",
+    "dash:user": "node dashboard/makeUser.js"
   },
   "keywords": [],
   "author": "",

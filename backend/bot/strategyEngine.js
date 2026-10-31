@@ -17,6 +17,7 @@ const cfg = require('./config');
 const state = require('./state');
 const execution = require('./execution');
 const logger = require('./logger');
+const circuitBreaker = require('./circuitBreaker');
 
 class StrategyEngine {
   constructor(feed, volumeFeed = null) {
@@ -302,6 +303,21 @@ class StrategyEngine {
     }
   }
 
+  // Circuit-breaker gate for BUYS (an expired daily trip is cleared and persisted here).
+  _cbBlocksBuy() {
+    const wasTripped = !!this.state.cbTripped;
+    const blocked = circuitBreaker.blocksBuy(this.state);
+    if (wasTripped && !blocked) state.saveAfterTrade(this.state).catch(() => {});
+    if (blocked) {
+      const now = Date.now();
+      if (now - (this._lastCbLog || 0) > 600000) {
+        this._lastCbLog = now;
+        logger.note(`Buy skipped: circuit breaker tripped (${this.state.cbReason}) — ${this.state.cbDetail}`);
+      }
+    }
+    return blocked;
+  }
+
   // Volume confirmation gate for BUYS. Returns true if the buy is blocked (low volume
   // = likely fake breakout). Instant check (no chase) against the Binance volume MA.
   _volumeBlocksBuy() {
@@ -405,6 +421,8 @@ class StrategyEngine {
           if (Date.now() - this._pendingEntry.since < cfg.ENTRY_CONFIRM_MS) return; // still confirming
           this._pendingEntry = null; // held the full window → real breakout
         }
+        if (this.isPaused && this.isPaused()) return; // paused from the dashboard → no new entries
+        if (this._cbBlocksBuy()) return;         // circuit breaker: repeated losses → no new entries
         if (this._atrBlocksBuy()) return;        // anti-whipsaw: skip dead / low-volatility chop
         if (this._rsiBlocksBuy()) return;        // momentum confirmation: was this really an oversold dip?
         if (this._trendBlocksBuy(price, trend)) return;
@@ -454,6 +472,14 @@ class StrategyEngine {
         if (this._passesProfitGuard(p)) await this._act('SELL', p);
       }
     }
+  }
+
+  // Dashboard emergency sell: exit the whole open position now, through the normal
+  // execution path (lock, slippage protection, escalating exit retries).
+  async manualSell(price) {
+    if (!this.state || this.state.position !== 'IN_WETH') return false;
+    await this._act('SELL', price || this.state.anchorPrice, 'manual-sell');
+    return this.state.position !== 'IN_WETH';
   }
 
   async _act(side, price, reason = null) {
@@ -508,6 +534,7 @@ class StrategyEngine {
       }
     } catch (e) {
       this._revertUntil = Date.now() + cfg.REVERT_BACKOFF_MS;
+      this.lastError = { at: new Date(), side, msg: (e.message || e).toString().slice(0, 200) }; // shown on the dashboard
       logger.warn(`[engine] execution error (backing off ${Math.round(cfg.REVERT_BACKOFF_MS / 1000)}s): ` + (e.message || e).toString().slice(0, 300));
     } finally {
       // the lock self-expires after 2 min, so a failed release is safe to just log

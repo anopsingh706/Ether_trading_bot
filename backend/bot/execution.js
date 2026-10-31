@@ -20,6 +20,7 @@ const { ethers } = require('ethers');
 const cfg = require('./config');
 const BotOrder = require('./models/BotOrder');
 const Counter = require('./models/Counter');
+const circuitBreaker = require('./circuitBreaker');
 const state = require('./state');
 const logger = require('./logger');
 
@@ -88,6 +89,7 @@ async function finalize(side, s, price, extreme, amount, quantity, realized, met
       s.roundTrips = (s.roundTrips || 0) + 1;
       if (profit >= 0) s.wins = (s.wins || 0) + 1;
       else s.losses = (s.losses || 0) + 1;
+      circuitBreaker.onTradeClosed(s, profit); // may stop new buys (persisted below with the trade)
     } else {
       logger.note('SELL with no recorded entry — profit unknown for this trade');
     }

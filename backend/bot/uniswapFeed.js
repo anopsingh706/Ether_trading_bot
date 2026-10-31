@@ -69,7 +69,7 @@ class UniswapFeed extends EventEmitter {
     const t0 = (await pool.token0()).toLowerCase();
     this.wethIsToken0 = t0 === cfg.WETH_ADDRESS.toLowerCase();
     console.log(`🦄 [${cfg.DEX_NAME} ${cfg.CHAIN_NAME}] pool ${addr} (fee ${fee}, WETH = token${this.wethIsToken0 ? '0' : '1'}, liquidity ${liq.toString()})`);
-    if (liq === 0n) console.warn('⚠️ [uniswap] pool liquidity reads 0 — check BOT_POOL_FEE');
+    if (liq === 0n) console.warn(`⚠️ [${cfg.DEX_NAME} ${cfg.CHAIN_NAME}] pool liquidity reads 0 — check the pool-fee setting`);
   }
 
   async _readPrice(source) {
@@ -117,10 +117,10 @@ class UniswapFeed extends EventEmitter {
     try {
       this.wsProvider = new ethers.WebSocketProvider(cfg.RPC_WSS);
       this.wsProvider.on('block', () => this._readPrice('block'));
-      this.wsProvider.on('error', (e) => logger.line('⚠️ [uniswap-ws] error (polling continues):', e.message));
-      console.log('🔌 [uniswap] websocket block subscription active (real-time)');
+      this.wsProvider.on('error', (e) => logger.line(`⚠️ [${cfg.DEX_NAME} ${cfg.CHAIN_NAME} ws] error (polling continues):`, e.message));
+      console.log(`🔌 [${cfg.DEX_NAME} ${cfg.CHAIN_NAME}] websocket block subscription active (real-time)`);
     } catch (e) {
-      console.warn('⚠️ [uniswap] websocket unavailable, using polling only:', e.message);
+      console.warn(`⚠️ [${cfg.DEX_NAME} ${cfg.CHAIN_NAME}] websocket unavailable, using polling only:`, e.message);
     }
   }
 

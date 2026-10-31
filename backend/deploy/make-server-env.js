@@ -19,7 +19,7 @@ const OUT_ENV = path.join(ROOT, '.env.server');
 
 // 1) every env var the bot can read
 const files = ['botRunner.js', 'botSimRunner.js'];
-for (const dir of ['bot', 'bot/models']) {
+for (const dir of ['bot', 'bot/models', 'dashboard']) {
   for (const f of fs.readdirSync(path.join(ROOT, dir))) {
     if (f.endsWith('.js') && !f.startsWith('backtest')) files.push(path.join(dir, f));
   }

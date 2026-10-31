@@ -47,6 +47,37 @@ const BotStateSchema = new Schema(
     losses:          { type: Number, default: 0 },
     cumulativePnl:   { type: Number, default: 0 }, // realized USDT profit
 
+    // circuit breaker (see bot/circuitBreaker.js)
+    cbConsecLosses:  { type: Number,  default: 0 },
+    cbDay:           { type: String,  default: null },  // UTC day 'YYYY-MM-DD' of cbDayPnl
+    cbDayPnl:        { type: Number,  default: 0 },
+    cbPeakPnl:       { type: Number,  default: 0 },     // best cumulativePnl seen (drawdown reference)
+    cbTripped:       { type: Boolean, default: false },
+    cbReason:        { type: String,  default: null },  // 'consecutive' | 'daily' | 'drawdown'
+    cbDetail:        { type: String,  default: null },
+    cbTrippedAt:     { type: Date,    default: null },
+
+    // dashboard: heartbeat written by the bot (bot/control.js)
+    hbAt:            { type: Date,    default: null },
+    hbStopped:       { type: Boolean, default: false },
+    hbPid:           { type: Number,  default: null },
+    hbVersion:       { type: String,  default: null },
+    hbMode:          { type: String,  default: null },
+    hbChain:         { type: String,  default: null },
+    hbExitMode:      { type: String,  default: null },
+    hbPrice:         { type: Number,  default: null },
+    hbStale:         { type: Boolean, default: false },
+    hbLine:          { type: String,  default: null },
+    hbLastError:     { type: Schema.Types.Mixed, default: null },
+    // dashboard: commands written by the dashboard, carried out by the bot
+    ctlPaused:        { type: Boolean, default: false },
+    ctlSellReqAt:     { type: Date,    default: null },
+    ctlSellDoneAt:    { type: Date,    default: null },
+    ctlSellNote:      { type: String,  default: null },
+    ctlCbResetReqAt:  { type: Date,    default: null },
+    ctlCbResetDoneAt: { type: Date,    default: null },
+    ctlLog:           { type: [Schema.Types.Mixed], default: [] }, // audit: who did what, when (last 50)
+
     // persistent execution lock (guards against overlapping swaps)
     isExecuting:     { type: Boolean, default: false },
     lockedAt:        { type: Date,   default: null },

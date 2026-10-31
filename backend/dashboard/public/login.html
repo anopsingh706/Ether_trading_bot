@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eather bot — sign in</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body class="login">
+  <form method="post" action="/login" class="card login-card" autocomplete="on">
+    <h1>Eather bot</h1>
+    <p class="muted">Sign in to view the live trading bot.</p>
+    <!--MSG-->
+    <label>Username <input name="user" autocomplete="username" required maxlength="32" autofocus></label>
+    <label>Password <input name="pass" type="password" autocomplete="current-password" required maxlength="200"></label>
+    <button type="submit" class="btn primary">Sign in</button>
+  </form>
+</body>
+</html>

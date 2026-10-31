@@ -247,6 +247,16 @@ module.exports = {
   EXIT_SLIPPAGE_MAX:   num(process.env.BOT_EXIT_SLIPPAGE_MAX, 0.02),  // exit-only hard cap (2%) — beats a 2%+ chase-down
   EXIT_RETRY_DELAY_MS: num(process.env.BOT_EXIT_RETRY_DELAY_MS, 3000),// gap between escalating exit retries
 
+  // ── Circuit breaker (stop NEW buys after repeated losses) ─────────────────────
+  // Only blocks entries — an open position is still managed/exited normally. Each
+  // limit: 0 = off. 'consecutive' and 'drawdown' trips stay until reset by hand
+  // (npm run cb:reset) — a pm2 crash-restart must NOT silently resume trading; the
+  // 'daily' trip clears itself at the next UTC day.
+  CB_ENABLED:            bool(process.env.BOT_CB_ENABLED, true),
+  CB_MAX_CONSEC_LOSSES:  num(process.env.BOT_CB_MAX_CONSEC_LOSSES, 5),    // losing round trips in a row
+  CB_MAX_DAILY_LOSS_USD: num(process.env.BOT_CB_MAX_DAILY_LOSS_USD, 2),   // realized loss in one UTC day
+  CB_MAX_DRAWDOWN_USD:   num(process.env.BOT_CB_MAX_DRAWDOWN_USD, 5),     // drop of realized P&L from its best level
+
   // ── Tokens / chain ───────────────────────────────────────────────────────────
   CHAIN, CHAIN_ID: C.chainId, CHAIN_NAME: C.name, DEX_NAME: C.dex,
   CHAIN_SUFFIX: C.suffix,                               // '' on Polygon (legacy names), '-base' on Base

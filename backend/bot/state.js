@@ -84,6 +84,11 @@ async function loadOrInit() {
     await s.save();
   }
 
+  // circuit breaker on a pre-existing state: start the drawdown reference at the
+  // CURRENT realized P&L (not 0), or old history would count as a fresh drawdown.
+  if (typeof s.$isDefault === 'function' && s.$isDefault('cbPeakPnl')) s.cbPeakPnl = s.cumulativePnl || 0;
+  if (s.cbTripped) console.warn(`⛔ [state] circuit breaker is TRIPPED (${s.cbReason}): ${s.cbDetail} — no new buys until reset (npm run cb:reset)`);
+
   // RE-ANCHOR ON RESTART: a persisted peak/bottom can be hours/days stale after a
   // stop. Trading off it would fire a wrong entry/exit the instant the feed returns
   // (e.g. "buy" just because price is above yesterday's level). Clearing it makes the
@@ -132,6 +137,8 @@ async function saveAfterTrade(s) {
         wins: s.wins,
         losses: s.losses,
         cumulativePnl: s.cumulativePnl,
+        cbConsecLosses: s.cbConsecLosses, cbDay: s.cbDay, cbDayPnl: s.cbDayPnl, cbPeakPnl: s.cbPeakPnl,
+        cbTripped: s.cbTripped, cbReason: s.cbReason, cbDetail: s.cbDetail, cbTrippedAt: s.cbTrippedAt,
         simUsdt: s.simUsdt,
         simWeth: s.simWeth,
         simGasUsd: s.simGasUsd,

@@ -71,6 +71,42 @@ pm2 save                                         # restored automatically after 
 pm2 logs eather-bot                              # check: LIVE · chain : Base … · exits : REGIME mode
 ```
 
+## 6. Web dashboard (watch + control, from any phone or PC)
+
+Shows: bot running / paused / not responding, live price, position, profit/loss
+(today + all-time), wallet balance, circuit breaker, live status line, every trade
+with an explorer link, and an audit log of dashboard actions.
+**Admin** login can **Pause** (no new buys — an open position is still managed),
+**Resume**, **Reset circuit breaker**, and **Emergency sell & pause** (type SELL to
+confirm). **Viewer** login (e.g. a friend) can only look. Commands go through the
+database and are carried out by the bot itself; the dashboard process never has
+the wallet key.
+
+1. **Free domain:** sign in at **duckdns.org** (Google/GitHub), add a sub-domain
+   (e.g. `eatherbot`), set *current ip* to the droplet IP, press *update ip*.
+2. **HTTPS (as root):**
+   `bash /home/eather/Ether_trading_bot/backend/deploy/setup-dashboard.sh eatherbot.duckdns.org`
+3. **Users (as `eather`):** `cd ~/Ether_trading_bot/backend && npm run dash:user` —
+   once with role *admin* (you), once with *viewer* (your friend). Paste the printed
+   `DASH_*` lines into `.env` (`DASH_SECRET` only once).
+4. **Start it:** `pm2 start dashboard/server.js --name eather-dash && pm2 save`
+5. Open **https://eatherbot.duckdns.org** and sign in. Change a password: run
+   `npm run dash:user` again, replace that user's lines, `pm2 restart eather-dash`.
+
+## 7. Circuit breaker (automatic loss stop)
+
+Stops **new buys** (never sells) when losses pile up — defaults, all editable in `.env`:
+
+| Limit | Default | Clears |
+|---|---|---|
+| `BOT_CB_MAX_CONSEC_LOSSES` | 5 losing trades in a row | manual reset |
+| `BOT_CB_MAX_DAILY_LOSS_USD` | −$2 in one UTC day | automatically at 00:00 UTC |
+| `BOT_CB_MAX_DRAWDOWN_USD` | P/L −$5 below its best | manual reset |
+
+A trip shows on the dashboard and survives restarts. To resume after you've looked
+at what happened: press **Reset circuit breaker** on the dashboard (or, on the
+server, `npm run cb:reset && pm2 restart eather-bot`).
+
 ## Everyday commands (as `eather`)
 
 | What | Command |
@@ -80,6 +116,7 @@ pm2 logs eather-bot                              # check: LIVE · chain : Base �
 | Stop / start / restart | `pm2 stop eather-bot` · `pm2 start eather-bot` · `pm2 restart eather-bot` |
 | Change settings | `nano ~/Ether_trading_bot/backend/.env` then `pm2 restart eather-bot` |
 | Update code | `cd ~/Ether_trading_bot && git pull --ff-only && cd backend && npm ci --omit=dev && pm2 restart eather-bot` |
+| Dashboard logs / restart | `pm2 logs eather-dash` · `pm2 restart eather-dash` |
 | Simulation instead | `pm2 start botSimRunner.js --name eather-sim -- --live --mode regime` |
 
 ## Security checklist

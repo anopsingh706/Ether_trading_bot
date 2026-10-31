@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eather bot</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header class="top">
+  <div class="brand">Eather bot <span id="chain" class="tag"></span></div>
+  <div class="who"><span id="me"></span>
+    <form method="post" action="/logout"><button class="btn small">Sign out</button></form>
+  </div>
+</header>
+
+<main>
+  <section id="banner" class="banner" hidden></section>
+
+  <section class="grid">
+    <div class="card"><div class="label">Bot</div><div id="botState" class="big">…</div><div id="botSub" class="muted"></div></div>
+    <div class="card"><div class="label">ETH price</div><div id="price" class="big">…</div><div id="stale" class="muted"></div></div>
+    <div class="card"><div class="label">Position</div><div id="pos" class="big">…</div><div id="posSub" class="muted"></div></div>
+    <div class="card"><div class="label">Profit / loss</div><div id="pnlAll" class="big">…</div><div id="pnlSub" class="muted"></div></div>
+    <div class="card"><div class="label">Wallet</div><div id="wTotal" class="big">…</div><div id="wSub" class="muted"></div></div>
+    <div class="card"><div class="label">Circuit breaker</div><div id="cb" class="big">…</div><div id="cbSub" class="muted"></div></div>
+  </section>
+
+  <section id="controls" class="card" hidden>
+    <div class="label">Controls <span class="muted">(admin)</span></div>
+    <div class="row">
+      <button id="bPause" class="btn">⏸ Pause new buys</button>
+      <button id="bResume" class="btn primary">▶ Resume</button>
+      <button id="bCb" class="btn">↺ Reset circuit breaker</button>
+      <button id="bSell" class="btn danger">🚨 Emergency sell &amp; pause</button>
+    </div>
+    <p class="muted small">Pause stops new buys only — an open position is still managed and exited by the bot. Emergency sell sells the whole position at market now, then pauses.</p>
+    <p id="ctlMsg" class="msg"></p>
+  </section>
+
+  <section class="card">
+    <div class="label">Live status line</div>
+    <pre id="line" class="line">…</pre>
+    <p id="lastErr" class="muted small"></p>
+  </section>
+
+  <section class="card">
+    <div class="label">Trades <span class="muted">(newest first)</span></div>
+    <div class="scroll"><table id="trades"><thead><tr>
+      <th>Time</th><th>Side</th><th class="r">Price</th><th class="r">USDC</th><th class="r">WETH</th><th class="r">P/L</th><th>Reason</th><th>Tx</th>
+    </tr></thead><tbody></tbody></table></div>
+    <p id="noTrades" class="muted" hidden>No trades yet — the bot waits for a dip with RSI ≤ 40, high volume and an uptrend.</p>
+  </section>
+
+  <section class="card">
+    <div class="label">Activity <span class="muted">(dashboard actions)</span></div>
+    <ul id="log" class="log"></ul>
+  </section>
+  <p class="muted small foot">Updates every 5 s · <span id="updated"></span> · <a id="scan" target="_blank" rel="noopener">wallet on explorer</a></p>
+</main>
+
+<dialog id="sellDlg">
+  <form method="dialog">
+    <h2>Emergency sell</h2>
+    <p>This sells the bot's whole WETH position at the current market price and pauses the bot. Type <b>SELL</b> to confirm.</p>
+    <input id="sellConfirm" autocomplete="off" maxlength="8">
+    <div class="row"><button value="cancel" class="btn">Cancel</button><button id="sellGo" value="go" class="btn danger">Sell now</button></div>
+  </form>
+</dialog>
+</body>
+</html>

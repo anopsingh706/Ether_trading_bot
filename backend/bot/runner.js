@@ -13,6 +13,7 @@ const StrategyEngine = require('./strategyEngine');
 const VolumeFeed = require('./volumeFeed');
 const BotTick = require('./models/BotTick');
 const logger = require('./logger');
+const control = require('./control');
 
 let _lastTickLog = 0;
 
@@ -51,6 +52,8 @@ async function main() {
   console.log(`   volume    : ${cfg.VOLUME_FILTER ? 'confirm ON — buy only if ' + cfg.VOLUME_SYMBOL.toUpperCase() + ' ' + cfg.VOLUME_INTERVAL + ' vol ≥ ' + cfg.VOLUME_MULT + '× ' + cfg.VOLUME_WINDOW + '-MA' : 'off'}`);
   console.log(`   atr filt  : ${cfg.ATR_FILTER ? 'ON — skip entries when ATR < ' + cfg.ATR_MIN_PCT + '% (period ' + cfg.ATR_PERIOD + ')' : 'off'}`);
   console.log(`   atr trig  : entry ${cfg.ATR_ENTRY_MULT > 0 ? 'ATR×' + cfg.ATR_ENTRY_MULT + ' (replaces fixed $ once warm)' : 'off (fixed $ threshold)'} | exit ${cfg.ATR_EXIT_MULT > 0 ? 'ATR×' + cfg.ATR_EXIT_MULT : 'off (fixed $ threshold)'}`);
+  console.log(`   circuit   : ${cfg.CB_ENABLED ? `ON — stop new buys after ${cfg.CB_MAX_CONSEC_LOSSES || '∞'} losses in a row | −$${cfg.CB_MAX_DAILY_LOSS_USD || '∞'}/day | −$${cfg.CB_MAX_DRAWDOWN_USD || '∞'} from best` : 'off'}`);
+  console.log(`   dashboard : heartbeat + remote controls via DB (pause / resume / emergency sell / reset breaker)`);
   console.log(`   rsi filt  : ${cfg.RSI_FILTER ? 'ON — buy only if RSI ≤ ' + cfg.RSI_MAX_ENTRY + ' (period ' + cfg.RSI_PERIOD + ', confirms a real oversold dip)' : 'off'}`);
   console.log(`   db        : ${botConn.name}`);
   console.log(`   chain     : ${cfg.CHAIN_NAME} — ${cfg.DEX_NAME} WETH/${cfg.USDC_SYMBOL} fee ${cfg.POOL_FEE} (${cfg.POOL_FEE / 1e4}%) | gas in ${cfg.NATIVE_SYMBOL}${cfg.L1_FEE_ORACLE ? ' + L1 data fee' : ''} | rpc ${/infura|alchemy/.test(cfg.RPC_HTTP || '') ? 'private' : (cfg.RPC_HTTP || '—')}`);
@@ -62,6 +65,7 @@ async function main() {
   const volumeFeed = (cfg.VOLUME_FILTER || cfg.ATR_FILTER) ? new VolumeFeed() : null;
   const engine = new StrategyEngine(feed, volumeFeed);
   await engine.init();
+  control.start(engine, feed); // BEFORE the feed starts: a saved pause must hold from the very first tick
   logger.tradeTableHeader();
 
   feed.on('tick', (t) => {
@@ -132,7 +136,8 @@ async function main() {
       `${holding ? 'peak' : swinging ? 'low' : 'bot'} ${fmt(s.anchorPrice)} | trend ${trendStr}${tr.ma ? ' MA' + fmt(tr.ma) : ''} | next ${next}${stopStr} | ` +
       `${holding || swinging ? 'unreal ' + signed(unreal) : 'flat'} | ` +
       `RT ${s.roundTrips || 0} W${s.wins || 0}/L${s.losses || 0} | PnL ${signed(s.cumulativePnl || 0)}${simStr} | ` +
-      `${ticks}t/5s${feed.isStale() ? ' ⚠️STALE' : ''}`;
+      `${ticks}t/5s${feed.isStale() ? ' ⚠️STALE' : ''}${control.paused() ? ' ⏸PAUSED' : ''}`;
+    engine.statusLine = line; // published to the dashboard by the heartbeat
 
     // sim hard-stop: shut down cleanly once the configured swap count is reached.
     if (cfg.SIM_MODE && cfg.SIM_MAX_TX > 0 && (s.txCount || 0) >= cfg.SIM_MAX_TX) {
@@ -150,7 +155,10 @@ async function main() {
     }
   }, 5000);
 
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     const s = engine.state || {};
     logger.tableFooter();
     logger.summary({
@@ -160,6 +168,7 @@ async function main() {
       realized: s.cumulativePnl || 0,
     });
     console.log('🛑 Shutting down…');
+    await control.stopped().catch(() => {}); // dashboard shows "stopped" instead of waiting for the heartbeat to age
     feed.stop();
     if (volumeFeed) volumeFeed.stop();
     try { await botConn.close(); } catch (_) {}
