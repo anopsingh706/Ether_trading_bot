@@ -78,6 +78,11 @@ const BotStateSchema = new Schema(
     ctlCbResetReqAt:  { type: Date,    default: null },
     ctlCbResetDoneAt: { type: Date,    default: null },
     ctlUnhaltReqAt:   { type: Date,    default: null },
+    ctlTriggerMode:   { type: String,  default: null },   // 'manual' | 'atr' (null = config default)
+    ctlEntryUsd:      { type: Number,  default: null },
+    ctlExitUsd:       { type: Number,  default: null },
+    hbEntryDelta:     { type: Number,  default: null },   // trigger distances in force right now ($)
+    hbExitDelta:      { type: Number,  default: null },
     ctlUnhaltDoneAt:  { type: Date,    default: null },
     ctlLog:           { type: [Schema.Types.Mixed], default: [] }, // audit: who did what, when (last 50)
 

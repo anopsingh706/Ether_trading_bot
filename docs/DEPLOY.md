@@ -93,6 +93,15 @@ the wallet key.
 5. Open **https://eatherbot.duckdns.org** and sign in. Change a password: run
    `npm run dash:user` again, replace that user's lines, `pm2 restart eather-dash`.
 
+### Buy / sell trigger (dashboard)
+
+The **Buy / sell trigger** card sets how far the price must move before the bot acts:
+**Manual $** (default **$1 / $1**) — buy when price rises $X off the low, sell when it falls
+$Y off the peak (sells only above break-even); use **− / +** ($0.25 steps, $0.10–$100) and
+**Save trigger** — the bot applies it within ~3 s and keeps it across restarts.
+**Auto (ATR)** switches back to the volatility-adaptive trigger. "In force now" shows what
+the bot is actually using. Viewers can see it but not change it.
+
 ## 7. Circuit breaker (automatic loss stop)
 
 Stops **new buys** (never sells) when losses pile up — defaults, all editable in `.env`:

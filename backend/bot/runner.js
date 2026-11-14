@@ -32,7 +32,7 @@ async function main() {
   } else {
     console.log('   mode      : ⚠️  LIVE (real funds) — every run trades real money');
   }
-  console.log(`   entry/exit: buy +${cfg.ENTRY_THRESHOLD} / sell -${cfg.EXIT_THRESHOLD} (${cfg.THRESHOLD_MODE})`);
+  console.log(`   trigger   : default ${cfg.TRIGGER_MODE === 'atr' ? 'AUTO (ATR)' : `manual — buy +$${cfg.TRIGGER_ENTRY_USD} / sell −$${cfg.TRIGGER_EXIT_USD}`} (the dashboard setting, if saved, wins — see [control] line)`);
   console.log(`   smoothing : ${cfg.SMOOTHING ? 'EMA ~' + Math.round(cfg.SMOOTHING_MS / 1000) + 's (decisions on smoothed price)' : 'off (raw ticks)'}`);
   console.log(`   guards    : minNetProfit=${cfg.MIN_NET_PROFIT} USDC | slippageAlert=${cfg.SLIPPAGE_ALERT_BPS}bps${cfg.SLIPPAGE_HALT ? ' (HALT on)' : ''}`);
   console.log(`   swap safe : minOut slip ${(cfg.SLIPPAGE_TOLERANCE * 100).toFixed(2)}%→${(cfg.SLIPPAGE_MAX * 100).toFixed(2)}% (ATR-adaptive ×${cfg.SLIPPAGE_ATR_MULT}) | revert backoff ${Math.round(cfg.REVERT_BACKOFF_MS / 1000)}s`);
@@ -92,9 +92,9 @@ async function main() {
     const ticks = feed.tickCount - lastTickCount;
     lastTickCount = feed.tickCount;
 
-    const pct = cfg.THRESHOLD_MODE === 'percent';
-    const entryDelta = s.anchorPrice != null ? (pct ? (s.anchorPrice * cfg.ENTRY_THRESHOLD) / 100 : cfg.ENTRY_THRESHOLD) : 0;
-    const exitDelta  = s.anchorPrice != null ? (pct ? (s.anchorPrice * cfg.EXIT_THRESHOLD)  / 100 : cfg.EXIT_THRESHOLD)  : 0;
+    // the trigger distances the engine REALLY uses (dashboard manual $, or ATR)
+    const entryDelta = s.anchorPrice != null ? engine._entryDelta(s.anchorPrice) : 0;
+    const exitDelta  = s.anchorPrice != null ? engine._exitDelta(s.anchorPrice) : 0;
 
     const holding = s.position === 'IN_WETH';
     const swinging = s.position === 'IN_SWING';

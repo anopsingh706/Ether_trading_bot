@@ -147,6 +147,13 @@ async function status() {
     control: { paused: !!s.ctlPaused, sellPending: !!(s.ctlSellReqAt && (!s.ctlSellDoneAt || new Date(s.ctlSellReqAt) > new Date(s.ctlSellDoneAt))), sellNote: s.ctlSellNote,
       cbResetPending: !!(s.ctlCbResetReqAt && (!s.ctlCbResetDoneAt || new Date(s.ctlCbResetReqAt) > new Date(s.ctlCbResetDoneAt))),
       unhaltPending: !!(s.ctlUnhaltReqAt && (!s.ctlUnhaltDoneAt || new Date(s.ctlUnhaltReqAt) > new Date(s.ctlUnhaltDoneAt))) },
+    triggers: {
+      mode: s.ctlTriggerMode === 'atr' || s.ctlTriggerMode === 'manual' ? s.ctlTriggerMode : cfg.TRIGGER_MODE,
+      entryUsd: s.ctlEntryUsd != null ? s.ctlEntryUsd : cfg.TRIGGER_ENTRY_USD,
+      exitUsd: s.ctlExitUsd != null ? s.ctlExitUsd : cfg.TRIGGER_EXIT_USD,
+      inForce: { entry: s.hbEntryDelta, exit: s.hbExitDelta },         // what the bot is using right now
+      min: cfg.TRIGGER_MIN_USD, max: cfg.TRIGGER_MAX_USD,
+    },
     log: (s.ctlLog || []).slice(-20).reverse(),
     trades: orders.map((o) => ({ at: o.createdAt, side: o.side === 1 ? 'BUY' : 'SELL', price: o.realized_rate, usdc: o.amount, weth: o.quantity, profit: o.profit, pct: o.profit_pct, reason: o.exit_reason, gas: o.gas_fee, tx: o.tx_hash })),
     wallet_balance: await wallet(price),
@@ -161,6 +168,16 @@ async function command(user, action, body) {
   else if (action === 'sell') { if (body.confirm !== 'SELL') return 'type SELL to confirm'; set.ctlSellReqAt = now; }
   else if (action === 'cbreset') set.ctlCbResetReqAt = now;
   else if (action === 'unhalt') set.ctlUnhaltReqAt = now;
+  else if (action === 'triggers') {
+    const mode = body.mode === 'atr' ? 'atr' : body.mode === 'manual' ? 'manual' : null;
+    const val = (v) => { const n = Math.round(Number(v) * 100) / 100; return isFinite(n) && n >= cfg.TRIGGER_MIN_USD && n <= cfg.TRIGGER_MAX_USD ? n : null; };
+    const e = val(body.entryUsd), x = val(body.exitUsd);
+    if (!mode) return 'mode must be manual or atr';
+    if (mode === 'manual' && (e == null || x == null)) return `trigger must be between $${cfg.TRIGGER_MIN_USD} and $${cfg.TRIGGER_MAX_USD}`;
+    set.ctlTriggerMode = mode;
+    if (mode === 'manual') { set.ctlEntryUsd = e; set.ctlExitUsd = x; }
+    action = mode === 'atr' ? 'trigger → AUTO (ATR)' : `trigger → buy +$${e.toFixed(2)} / sell −$${x.toFixed(2)}`;
+  }
   else return 'unknown action';
   await BotState.updateOne({ key: STATE_KEY }, { $set: set, $push: { ctlLog: { $each: [{ at: now, by: user.u, action }], $slice: -50 } } });
   console.log(`[dashboard] ${now.toISOString()} ${user.u} → ${action}`);

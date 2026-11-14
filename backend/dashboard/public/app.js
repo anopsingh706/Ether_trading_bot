@@ -7,6 +7,9 @@
   const ago = (s) => (s == null ? 'never' : s < 90 ? `${Math.round(s)}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${(s / 3600).toFixed(1)} h ago`);
   const time = (d) => new Date(d).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   let csrf = null, data = null;
+  // trigger editor: local draft, so the 5 s refresh doesn't overwrite what you're changing
+  let tDraft = null, tDirty = false;
+  const STEP = 0.25;
 
   function render(d) {
     data = d;
@@ -74,6 +77,18 @@
     $('bUnhalt').hidden = !b.halted;
     $('bUnhalt').disabled = d.control.unhaltPending;
 
+    // trigger
+    const T = d.triggers; const admin = d.me.role === 'admin';
+    if (!tDirty || !tDraft) tDraft = { mode: T.mode, entryUsd: T.entryUsd, exitUsd: T.exitUsd };
+    $('tManual').checked = tDraft.mode === 'manual'; $('tAtr').checked = tDraft.mode === 'atr';
+    $('tEntry').textContent = '$' + tDraft.entryUsd.toFixed(2); $('tExit').textContent = '$' + tDraft.exitUsd.toFixed(2);
+    for (const el of document.querySelectorAll('[data-step], #tManual, #tAtr')) el.disabled = !admin || (!!el.dataset.step && tDraft.mode === 'atr');
+    $('tSave').hidden = !admin; $('tSave').disabled = !tDirty;
+    const inf = T.inForce;
+    $('tInfo').textContent = (T.mode === 'atr' ? 'Auto: the trigger follows volatility (ATR). ' : '') +
+      (inf && inf.entry != null ? `In force now: buy +$${inf.entry.toFixed(2)} off the low · sell −$${inf.exit.toFixed(2)} off the peak (sells only above break-even).` : 'In force now: waiting for the bot.') +
+      (tDirty ? ' — unsaved changes' : '');
+
     // status line + error
     $('line').textContent = b.line || '—';
     $('lastErr').textContent = b.lastError ? `last swap error (${time(b.lastError.at)}): ${b.lastError.side} — ${b.lastError.msg}` : '';
@@ -124,7 +139,7 @@
       const j = await r.json();
       $('ctlMsg').textContent = j.ok ? 'Sent — the bot applies it within a few seconds.' : 'Error: ' + j.error;
       cls($('ctlMsg'), j.ok ? 'good' : 'bad');
-    } catch { $('ctlMsg').textContent = 'Error: could not reach the dashboard'; cls($('ctlMsg'), 'bad'); }
+    } catch { $('ctlMsg').textContent = 'Not sent — your internet connection dropped (or the server is restarting). Check your connection and press again.'; cls($('ctlMsg'), 'bad'); }
     refresh();
   }
 
@@ -133,6 +148,15 @@
     $('bResume').addEventListener('click', () => control('resume'));
     $('bCb').addEventListener('click', () => control('cbreset'));
     $('bUnhalt').addEventListener('click', () => control('unhalt'));
+    const bump = (which, dir) => {
+      if (!tDraft || !data) return;
+      const k = which === 'entry' ? 'entryUsd' : 'exitUsd';
+      const v = Math.round((tDraft[k] + (dir === '+' ? STEP : -STEP)) * 100) / 100;
+      tDraft[k] = Math.min(data.triggers.max, Math.max(data.triggers.min, v)); tDirty = true; render(data);
+    };
+    for (const b of document.querySelectorAll('[data-step]')) b.addEventListener('click', () => { const [w, dir] = b.dataset.step.split(':'); bump(w, dir); });
+    for (const r of [$('tManual'), $('tAtr')]) r.addEventListener('change', () => { if (tDraft) { tDraft.mode = r.value; tDirty = true; render(data); } });
+    $('tSave').addEventListener('click', async () => { await control('triggers', tDraft); tDirty = false; });
     const dlg = $('sellDlg');
     $('bSell').addEventListener('click', () => { $('sellConfirm').value = ''; dlg.showModal(); });
     dlg.addEventListener('close', () => { if (dlg.returnValue === 'go') control('sell', { confirm: $('sellConfirm').value.trim().toUpperCase() }); });

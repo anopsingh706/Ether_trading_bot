@@ -7,6 +7,7 @@
 //       ctlSellReqAt         → emergency sell of the open position, then pause
 //       ctlCbResetReqAt      → clear a tripped circuit breaker
 //       ctlUnhaltReqAt       → clear a slippage halt (after you've checked the trade)
+//       ctlTriggerMode / ctlEntryUsd / ctlExitUsd → buy/sell trigger (manual $ or ATR)
 // The dashboard never touches the bot process or the wallet key — the bot carries
 // out every command itself, with its normal safety checks (lock, slippage, retries).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,21 +22,41 @@ let paused = false;
 let pollTimer = null, hbTimer = null;
 const isNewer = (req, done) => req && (!done || new Date(req) > new Date(done));
 
+// dashboard trigger values (validated again here — the DB is the only input) or config defaults
+function triggersFrom(d) {
+  const ok = (v) => typeof v === 'number' && isFinite(v) && v >= cfg.TRIGGER_MIN_USD && v <= cfg.TRIGGER_MAX_USD;
+  return {
+    mode: d && (d.ctlTriggerMode === 'atr' || d.ctlTriggerMode === 'manual') ? d.ctlTriggerMode : cfg.TRIGGER_MODE,
+    entryUsd: d && ok(d.ctlEntryUsd) ? d.ctlEntryUsd : cfg.TRIGGER_ENTRY_USD,
+    exitUsd: d && ok(d.ctlExitUsd) ? d.ctlExitUsd : cfg.TRIGGER_EXIT_USD,
+  };
+}
+const fmtTrig = (t) => (t.mode === 'atr' ? 'AUTO (ATR)' : `manual — buy +$${t.entryUsd.toFixed(2)} / sell −$${t.exitUsd.toFixed(2)}`);
+
+const safeDelta = (fn) => { try { const v = fn(); return isFinite(v) ? v : null; } catch { return null; } };
+
 async function heartbeat(engine, feed) {
   await BotState.updateOne({ key: key() }, { $set: {
     hbAt: new Date(), hbStopped: false, hbPid: process.pid, hbVersion: pkg.version,
     hbMode: cfg.SIM_MODE ? 'sim' : 'live', hbChain: cfg.CHAIN_NAME, hbExitMode: cfg.EXIT_MODE,
     hbPrice: feed.lastPrice || null, hbStale: feed.isStale(), hbLine: engine.statusLine || null,
     hbLastError: engine.lastError || null, hbHalted: !!engine.halted,
+    hbEntryDelta: safeDelta(() => engine._entryDelta(engine.state && engine.state.anchorPrice)),
+    hbExitDelta: safeDelta(() => engine._exitDelta(engine.state && engine.state.anchorPrice)),
   } });
 }
 
 async function poll(engine, feed) {
   const d = await BotState.findOne({ key: key() },
-    { ctlPaused: 1, ctlSellReqAt: 1, ctlSellDoneAt: 1, ctlCbResetReqAt: 1, ctlCbResetDoneAt: 1, ctlUnhaltReqAt: 1, ctlUnhaltDoneAt: 1 }).lean();
+    { ctlPaused: 1, ctlSellReqAt: 1, ctlSellDoneAt: 1, ctlCbResetReqAt: 1, ctlCbResetDoneAt: 1, ctlUnhaltReqAt: 1, ctlUnhaltDoneAt: 1, ctlTriggerMode: 1, ctlEntryUsd: 1, ctlExitUsd: 1 }).lean();
   if (!d) return;
   if (!!d.ctlPaused !== paused) console.log(d.ctlPaused ? '⏸  [control] PAUSED from the dashboard — no new buys' : '▶️  [control] RESUMED from the dashboard');
   paused = !!d.ctlPaused;
+  const t = triggersFrom(d), cur = engine.triggers;
+  if (t.mode !== cur.mode || t.entryUsd !== cur.entryUsd || t.exitUsd !== cur.exitUsd) {
+    engine.triggers = t;
+    console.log(`🎚  [control] trigger set from the dashboard: ${fmtTrig(t)}`);
+  }
 
   if (isNewer(d.ctlCbResetReqAt, d.ctlCbResetDoneAt)) {
     circuitBreaker.reset(engine.state);
@@ -77,6 +98,8 @@ function start(engine, feed) {
   paused = !!(engine.state && engine.state.ctlPaused);
   if (paused) console.warn('⏸  [control] bot is PAUSED (set from the dashboard) — no new buys until resumed');
   engine.isPaused = () => paused;
+  engine.triggers = triggersFrom(engine.state);   // saved dashboard trigger holds from the first tick too
+  console.log(`🎚  [control] trigger: ${fmtTrig(engine.triggers)}`);
   const safe = (fn) => () => fn(engine, feed).catch(() => {}); // DB hiccups must never hurt trading
   pollTimer = setInterval(safe(poll), 3000);
   hbTimer = setInterval(safe(heartbeat), 10000);

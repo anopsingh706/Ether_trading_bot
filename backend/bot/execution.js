@@ -247,7 +247,7 @@ async function execLive(side, s, price, reason, atrPct) {
     const quantity = parseFloat(ethers.formatUnits(inAmt, cfg.WETH_DECIMALS));
     let amount, estimated = false;
     if (outAmt) amount = parseFloat(ethers.formatUnits(outAmt, cfg.USDT_DECIMALS));
-    else { amount = quantity * price * feeFactor(); estimated = true; logger.warn(`SELL confirmed but USDC received could not be measured — booked an ESTIMATE (${amount.toFixed(2)}). Check tx ${res.txHash}`); }
+    else { amount = quantity * price * feeFactor(); estimated = true; logger.warn(`SELL confirmed but USDC received could not be measured — booked an ESTIMATE ($${amount.toFixed(2)}). Check tx ${res.txHash}`); }
     const realized = amount / quantity;
     return finalize('SELL', s, price, extreme, amount, quantity, realized, { dry: false, gas: res.gasCostUSD, tx: res.txHash, reason, estimated });
   }

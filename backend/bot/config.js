@@ -247,6 +247,16 @@ module.exports = {
   EXIT_SLIPPAGE_MAX:   num(process.env.BOT_EXIT_SLIPPAGE_MAX, 0.02),  // exit-only hard cap (2%) — beats a 2%+ chase-down
   EXIT_RETRY_DELAY_MS: num(process.env.BOT_EXIT_RETRY_DELAY_MS, 3000),// gap between escalating exit retries
 
+  // ── Buy/sell trigger (adjustable live from the dashboard) ────────────────────
+  // 'manual' = fixed $ distance: BUY when price rises TRIGGER_ENTRY_USD off the low,
+  //            SELL (trailing, above break-even) when it falls TRIGGER_EXIT_USD off the peak.
+  // 'atr'    = volatility-adaptive (ATR × BOT_ATR_ENTRY_MULT / BOT_ATR_EXIT_MULT), the v3 behaviour.
+  // The dashboard's values (saved on BotState) override these defaults.
+  TRIGGER_MODE:      ((process.env.BOT_TRIGGER_MODE || 'manual').trim().toLowerCase() === 'atr' ? 'atr' : 'manual'),
+  TRIGGER_ENTRY_USD: num(process.env.BOT_TRIGGER_ENTRY_USD, 1),
+  TRIGGER_EXIT_USD:  num(process.env.BOT_TRIGGER_EXIT_USD, 1),
+  TRIGGER_MIN_USD: 0.1, TRIGGER_MAX_USD: 100,               // dashboard input limits
+
   // ── Circuit breaker (stop NEW buys after repeated losses) ─────────────────────
   // Only blocks entries — an open position is still managed/exited normally. Each
   // limit: 0 = off. 'consecutive' and 'drawdown' trips stay until reset by hand

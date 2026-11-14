@@ -65,7 +65,12 @@ class StrategyEngine {
   // trigger Δ = ATR × mult — this REPLACES the fixed threshold (not just a floor), so a
   // calm market gets a smaller trigger and a wild market gets a bigger one. The fixed
   // BOT_ENTRY_THRESHOLD/BOT_EXIT_THRESHOLD only apply as a fallback while ATR warms up.
+  // Live trigger settings (set by bot/control.js from the dashboard; defaults from config).
+  get triggers() { return this._triggers || { mode: cfg.TRIGGER_MODE, entryUsd: cfg.TRIGGER_ENTRY_USD, exitUsd: cfg.TRIGGER_EXIT_USD }; }
+  set triggers(t) { this._triggers = t; }
+
   _entryDelta(anchor) {
+    if (this.triggers.mode === 'manual') return this.triggers.entryUsd;
     let d = cfg.THRESHOLD_MODE === 'percent' ? (anchor * cfg.ENTRY_THRESHOLD) / 100 : cfg.ENTRY_THRESHOLD;
     if (cfg.ATR_ENTRY_MULT > 0 && this.volume) {
       const a = this.volume.atr();
@@ -74,6 +79,7 @@ class StrategyEngine {
     return d;
   }
   _exitDelta(anchor) {
+    if (this.triggers.mode === 'manual') return this.triggers.exitUsd;
     let d = cfg.THRESHOLD_MODE === 'percent' ? (anchor * cfg.EXIT_THRESHOLD) / 100 : cfg.EXIT_THRESHOLD;
     if (cfg.ATR_EXIT_MULT > 0 && this.volume) {
       const a = this.volume.atr();

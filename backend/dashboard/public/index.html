@@ -41,6 +41,22 @@
   </section>
 
   <section class="card">
+    <div class="label">Buy / sell trigger</div>
+    <div class="row trig">
+      <label class="radio"><input type="radio" name="tmode" value="manual" id="tManual"> Manual $</label>
+      <label class="radio"><input type="radio" name="tmode" value="atr" id="tAtr"> Auto (ATR)</label>
+    </div>
+    <div class="row trig">
+      <div class="stepper"><span class="muted">Buy when price rises</span>
+        <button class="btn small" data-step="entry:-">−</button><b id="tEntry">$1.00</b><button class="btn small" data-step="entry:+">+</button></div>
+      <div class="stepper"><span class="muted">Sell when price falls</span>
+        <button class="btn small" data-step="exit:-">−</button><b id="tExit">$1.00</b><button class="btn small" data-step="exit:+">+</button></div>
+      <button id="tSave" class="btn primary">Save trigger</button>
+    </div>
+    <p id="tInfo" class="muted small"></p>
+  </section>
+
+  <section class="card">
     <div class="label">Live status line</div>
     <pre id="line" class="line">…</pre>
     <p id="lastErr" class="muted small"></p>
