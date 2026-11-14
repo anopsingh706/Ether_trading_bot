@@ -19,9 +19,9 @@
 
     // bot
     const b = d.bot;
-    const st = !b.alive ? (b.stopped ? 'Stopped' : 'Not responding') : d.control.paused ? 'Paused' : 'Running';
-    $('botState').textContent = (b.alive ? (d.control.paused ? '⏸ ' : '● ') : '■ ') + st;
-    cls($('botState'), !b.alive ? 'bad' : d.control.paused ? 'warn' : 'good');
+    const st = !b.alive ? (b.stopped ? 'Stopped' : 'Not responding') : b.halted ? 'Halted' : d.control.paused ? 'Paused' : 'Running';
+    $('botState').textContent = (!b.alive ? '■ ' : b.halted ? '🛑 ' : d.control.paused ? '⏸ ' : '● ') + st;
+    cls($('botState'), !b.alive || b.halted ? 'bad' : d.control.paused ? 'warn' : 'good');
     $('botSub').textContent = `last heartbeat ${ago(b.lastSeenS)} · v${b.version || '?'} · exit ${b.exitMode || '?'}`;
 
     // price
@@ -60,6 +60,7 @@
     const bn = $('banner');
     let msg = null, level = 'warn';
     if (!b.alive) { msg = b.stopped ? 'The bot is stopped.' : `The bot is not responding (last heartbeat ${ago(b.lastSeenS)}). Check the server: pm2 status`; level = 'bad'; }
+    else if (b.halted) { msg = '🛑 Trading HALTED after a suspicious fill — the bot is ignoring prices. Check the last trade on the explorer, then press "Clear halt".'; level = 'bad'; }
     else if (d.control.sellPending) msg = '🚨 Emergency sell in progress…';
     else if (cb.tripped) { msg = `⛔ Circuit breaker tripped: ${cb.detail}. New buys are stopped.`; level = 'bad'; }
     else if (d.control.paused) msg = '⏸ Paused from the dashboard — no new buys. Press Resume to trade again.';
@@ -70,6 +71,8 @@
     $('bResume').disabled = !d.control.paused;
     $('bCb').disabled = !cb.tripped || d.control.cbResetPending;
     $('bSell').disabled = d.control.sellPending;
+    $('bUnhalt').hidden = !b.halted;
+    $('bUnhalt').disabled = d.control.unhaltPending;
 
     // status line + error
     $('line').textContent = b.line || '—';
@@ -129,6 +132,7 @@
     $('bPause').addEventListener('click', () => control('pause'));
     $('bResume').addEventListener('click', () => control('resume'));
     $('bCb').addEventListener('click', () => control('cbreset'));
+    $('bUnhalt').addEventListener('click', () => control('unhalt'));
     const dlg = $('sellDlg');
     $('bSell').addEventListener('click', () => { $('sellConfirm').value = ''; dlg.showModal(); });
     dlg.addEventListener('close', () => { if (dlg.returnValue === 'go') control('sell', { confirm: $('sellConfirm').value.trim().toUpperCase() }); });

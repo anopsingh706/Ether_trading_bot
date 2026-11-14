@@ -1,6 +1,6 @@
 {
   "name": "backend",
-  "version": "4.1.1",
+  "version": "4.1.2",
   "description": "Eather WETH/USDC trading bot (Uniswap v3, Polygon)",
   "main": "botRunner.js",
   "scripts": {
@@ -21,7 +21,8 @@
     "deploy:env": "node deploy/make-server-env.js",
     "cb:reset": "node bot/cbReset.js",
     "dashboard": "node dashboard/server.js",
-    "dash:user": "node dashboard/makeUser.js"
+    "dash:user": "node dashboard/makeUser.js",
+    "repair:trades": "node bot/repairTrades.js"
   },
   "keywords": [],
   "author": "",

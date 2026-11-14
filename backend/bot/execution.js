@@ -107,7 +107,9 @@ async function finalize(side, s, price, extreme, amount, quantity, realized, met
   // contract, so we measure how far the realized fill drifted from the decision
   // price and warn (optionally halt). In dry-run realized === price → 0 bps.
   const slippageBps = price > 0 ? Math.abs(realized - price) / price * 10000 : 0;
-  if (slippageBps > cfg.SLIPPAGE_ALERT_BPS) {
+  if (meta.estimated) {
+    logger.warn(`${side} amounts are an ESTIMATE (could not be measured) — slippage check skipped; run npm run repair:trades to correct the record`);
+  } else if (slippageBps > cfg.SLIPPAGE_ALERT_BPS) {
     logger.warn(`SLIPPAGE ALERT: ${side} filled @ ${realized.toFixed(2)} vs decision ${price.toFixed(2)} = ${slippageBps.toFixed(1)} bps (tolerance ${cfg.SLIPPAGE_ALERT_BPS})`);
     // never halt the simulation on slippage — fee/impact-driven drift is expected there
     if (cfg.SLIPPAGE_HALT && !meta.sim) { s.slippageHalt = true; logger.warn('SLIPPAGE_HALT is ON → trading will stop after this trade.'); }
@@ -162,6 +164,25 @@ async function finalize(side, s, price, extreme, amount, quantity, realized, met
   return s;
 }
 
+// What a confirmed swap actually moved. Primary: the exact amounts from the receipt's
+// Transfer events (dex.swap). Fallback: a balance diff, re-read until the node has caught
+// up — a node one block behind returns the PRE-swap balance, which once booked a real
+// 72.23 USDC sell as "received 0" (−$72 fake loss + slippage halt). If it still can't be
+// measured, return null so the caller books an ESTIMATE instead of an impossible trade.
+async function settledAmounts(dex, before, res, inKey, outKey) {
+  let inAmt = res.amountIn || null, outAmt = res.amountOut || null;
+  for (let i = 0; !outAmt && i < 6; i++) {
+    if (i) await sleep(2000);
+    const after = await dex.balances().catch(() => null);
+    if (after && after[outKey] > before[outKey]) {
+      outAmt = after[outKey] - before[outKey];
+      if (!inAmt && after[inKey] < before[inKey]) inAmt = before[inKey] - after[inKey];
+    }
+  }
+  return { inAmt: inAmt || before[inKey], outAmt };
+}
+const feeFactor = () => 1 - cfg.POOL_FEE / 1e6;
+
 // ── LIVE (real swaps on the chain's v3 DEX via router-02) ────────────────────────────
 async function execLive(side, s, price, reason, atrPct) {
   const extreme = s.anchorPrice;
@@ -193,12 +214,13 @@ async function execLive(side, s, price, reason, atrPct) {
     const res = await dex.swap('BUY', before.usdc, tol); // spend all USDC.e → WETH
     if (!res.success) { logger.warn('BUY swap failed/reverted'); return null; }
 
-    const after = await dex.balances();
-    const wethDelta = after.weth > before.weth ? after.weth - before.weth : 0n;
-    const amount = parseFloat(ethers.formatUnits(before.usdc, cfg.USDT_DECIMALS));
-    const quantity = parseFloat(ethers.formatUnits(wethDelta, cfg.WETH_DECIMALS));
-    const realized = quantity > 0 ? amount / quantity : price;
-    return finalize('BUY', s, price, extreme, amount, quantity, realized, { dry: false, gas: res.gasCostUSD, tx: res.txHash, reason });
+    const { inAmt, outAmt } = await settledAmounts(dex, before, res, 'usdc', 'weth');
+    const amount = parseFloat(ethers.formatUnits(inAmt, cfg.USDT_DECIMALS));
+    let quantity, estimated = false;
+    if (outAmt) quantity = parseFloat(ethers.formatUnits(outAmt, cfg.WETH_DECIMALS));
+    else { quantity = (amount / price) * feeFactor(); estimated = true; logger.warn(`BUY confirmed but WETH received could not be measured — booked an ESTIMATE (${quantity.toFixed(6)}). Check tx ${res.txHash}`); }
+    const realized = amount / quantity;
+    return finalize('BUY', s, price, extreme, amount, quantity, realized, { dry: false, gas: res.gasCostUSD, tx: res.txHash, reason, estimated });
   } else {
     if (before.native <= 0n) { logger.warn(`Cannot EXIT — no ${cfg.NATIVE_SYMBOL} in wallet for gas`); return null; }
 
@@ -221,12 +243,13 @@ async function execLive(side, s, price, reason, atrPct) {
     }
     if (!res || !res.success) { logger.warn('SELL swap failed/reverted (all retries)'); return null; }
 
-    const after = await dex.balances();
-    const usdcDelta = after.usdc > before.usdc ? after.usdc - before.usdc : 0n;
-    const amount = parseFloat(ethers.formatUnits(usdcDelta, cfg.USDT_DECIMALS));
-    const quantity = parseFloat(ethers.formatUnits(before.weth, cfg.WETH_DECIMALS));
-    const realized = quantity > 0 ? amount / quantity : price;
-    return finalize('SELL', s, price, extreme, amount, quantity, realized, { dry: false, gas: res.gasCostUSD, tx: res.txHash, reason });
+    const { inAmt, outAmt } = await settledAmounts(dex, before, res, 'weth', 'usdc');
+    const quantity = parseFloat(ethers.formatUnits(inAmt, cfg.WETH_DECIMALS));
+    let amount, estimated = false;
+    if (outAmt) amount = parseFloat(ethers.formatUnits(outAmt, cfg.USDT_DECIMALS));
+    else { amount = quantity * price * feeFactor(); estimated = true; logger.warn(`SELL confirmed but USDC received could not be measured — booked an ESTIMATE (${amount.toFixed(2)}). Check tx ${res.txHash}`); }
+    const realized = amount / quantity;
+    return finalize('SELL', s, price, extreme, amount, quantity, realized, { dry: false, gas: res.gasCostUSD, tx: res.txHash, reason, estimated });
   }
 }
 
@@ -272,11 +295,10 @@ async function execSwingSell(s, price, atrPct) {
   const res = await dex.swap('SELL', before.weth, slippageTol(atrPct));
   if (!res.success) { logger.warn('swing-sell swap failed/reverted'); return null; }
 
-  const after = await dex.balances();
-  const usdcDelta = after.usdc > before.usdc ? after.usdc - before.usdc : 0n;
-  const amount = parseFloat(ethers.formatUnits(usdcDelta, cfg.USDT_DECIMALS));
-  const quantity = parseFloat(ethers.formatUnits(before.weth, cfg.WETH_DECIMALS));
-  const realized = quantity > 0 ? amount / quantity : price;
+  const sw = await settledAmounts(dex, before, res, 'weth', 'usdc');
+  const quantity = parseFloat(ethers.formatUnits(sw.inAmt, cfg.WETH_DECIMALS));
+  const amount = sw.outAmt ? parseFloat(ethers.formatUnits(sw.outAmt, cfg.USDT_DECIMALS)) : quantity * price * feeFactor();
+  const realized = amount / quantity;
 
   s.position = 'IN_SWING';
   s.swingCash = amount;
@@ -307,11 +329,10 @@ async function execSwingBuy(s, price, atrPct, reason) {
   const res = await dex.swap('BUY', before.usdc, slippageTol(atrPct));
   if (!res.success) { logger.warn('swing-buy swap failed/reverted'); return null; }
 
-  const after = await dex.balances();
-  const wethDelta = after.weth > before.weth ? after.weth - before.weth : 0n;
-  const amount = parseFloat(ethers.formatUnits(before.usdc, cfg.USDT_DECIMALS));
-  const quantity = parseFloat(ethers.formatUnits(wethDelta, cfg.WETH_DECIMALS));
-  const realized = quantity > 0 ? amount / quantity : price;
+  const sb = await settledAmounts(dex, before, res, 'usdc', 'weth');
+  const amount = parseFloat(ethers.formatUnits(sb.inAmt, cfg.USDT_DECIMALS));
+  const quantity = sb.outAmt ? parseFloat(ethers.formatUnits(sb.outAmt, cfg.WETH_DECIMALS)) : (amount / price) * feeFactor();
+  const realized = amount / quantity;
 
   const prevQty = s.entryWeth;
   s.position = 'IN_WETH';
@@ -340,4 +361,4 @@ async function execute(side, s, price, reason, atrPct) {
   return execLive(side, s, price, reason, atrPct);
 }
 
-module.exports = { execute, finalize, slippageTol };
+module.exports = { _settledAmounts: settledAmounts, execute, finalize, slippageTol };

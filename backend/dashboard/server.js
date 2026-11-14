@@ -137,7 +137,7 @@ async function status() {
   return {
     now: new Date(), chain: cfg.CHAIN_NAME, dex: cfg.DEX_NAME, mode: cfg.SIM_MODE ? 'sim' : 'live', explorer: cfg.SCAN_TX_URL,
     wallet: cfg.SIM_MODE ? null : cfg.ADMIN_WALLET,
-    bot: { alive, stopped: !!s.hbStopped, lastSeenS: ageS, version: s.hbVersion, exitMode: s.hbExitMode, stale: !!s.hbStale, line: s.hbLine, lastError: s.hbLastError },
+    bot: { alive, halted: !!s.hbHalted, stopped: !!s.hbStopped, lastSeenS: ageS, version: s.hbVersion, exitMode: s.hbExitMode, stale: !!s.hbStale, line: s.hbLine, lastError: s.hbLastError },
     price,
     position: s.position, entryPrice: s.entryPrice, entryWeth: s.entryWeth, entryUsdt: s.entryUsdt, entryAt: s.entryAt,
     unrealized: s.position === 'IN_WETH' && price && s.entryWeth && s.entryUsdt ? price * s.entryWeth - s.entryUsdt : null,
@@ -145,7 +145,8 @@ async function status() {
     breaker: { enabled: cfg.CB_ENABLED, tripped: !!s.cbTripped, reason: s.cbReason, detail: s.cbDetail, at: s.cbTrippedAt, text: circuitBreaker.status(s),
       limits: { consec: cfg.CB_MAX_CONSEC_LOSSES, daily: cfg.CB_MAX_DAILY_LOSS_USD, drawdown: cfg.CB_MAX_DRAWDOWN_USD } },
     control: { paused: !!s.ctlPaused, sellPending: !!(s.ctlSellReqAt && (!s.ctlSellDoneAt || new Date(s.ctlSellReqAt) > new Date(s.ctlSellDoneAt))), sellNote: s.ctlSellNote,
-      cbResetPending: !!(s.ctlCbResetReqAt && (!s.ctlCbResetDoneAt || new Date(s.ctlCbResetReqAt) > new Date(s.ctlCbResetDoneAt))) },
+      cbResetPending: !!(s.ctlCbResetReqAt && (!s.ctlCbResetDoneAt || new Date(s.ctlCbResetReqAt) > new Date(s.ctlCbResetDoneAt))),
+      unhaltPending: !!(s.ctlUnhaltReqAt && (!s.ctlUnhaltDoneAt || new Date(s.ctlUnhaltReqAt) > new Date(s.ctlUnhaltDoneAt))) },
     log: (s.ctlLog || []).slice(-20).reverse(),
     trades: orders.map((o) => ({ at: o.createdAt, side: o.side === 1 ? 'BUY' : 'SELL', price: o.realized_rate, usdc: o.amount, weth: o.quantity, profit: o.profit, pct: o.profit_pct, reason: o.exit_reason, gas: o.gas_fee, tx: o.tx_hash })),
     wallet_balance: await wallet(price),
@@ -159,6 +160,7 @@ async function command(user, action, body) {
   else if (action === 'resume') set.ctlPaused = false;
   else if (action === 'sell') { if (body.confirm !== 'SELL') return 'type SELL to confirm'; set.ctlSellReqAt = now; }
   else if (action === 'cbreset') set.ctlCbResetReqAt = now;
+  else if (action === 'unhalt') set.ctlUnhaltReqAt = now;
   else return 'unknown action';
   await BotState.updateOne({ key: STATE_KEY }, { $set: set, $push: { ctlLog: { $each: [{ at: now, by: user.u, action }], $slice: -50 } } });
   console.log(`[dashboard] ${now.toISOString()} ${user.u} → ${action}`);

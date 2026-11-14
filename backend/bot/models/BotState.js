@@ -69,6 +69,7 @@ const BotStateSchema = new Schema(
     hbStale:         { type: Boolean, default: false },
     hbLine:          { type: String,  default: null },
     hbLastError:     { type: Schema.Types.Mixed, default: null },
+    hbHalted:        { type: Boolean, default: false },  // slippage halt active (engine ignores prices)
     // dashboard: commands written by the dashboard, carried out by the bot
     ctlPaused:        { type: Boolean, default: false },
     ctlSellReqAt:     { type: Date,    default: null },
@@ -76,6 +77,8 @@ const BotStateSchema = new Schema(
     ctlSellNote:      { type: String,  default: null },
     ctlCbResetReqAt:  { type: Date,    default: null },
     ctlCbResetDoneAt: { type: Date,    default: null },
+    ctlUnhaltReqAt:   { type: Date,    default: null },
+    ctlUnhaltDoneAt:  { type: Date,    default: null },
     ctlLog:           { type: [Schema.Types.Mixed], default: [] }, // audit: who did what, when (last 50)
 
     // persistent execution lock (guards against overlapping swaps)

@@ -6,6 +6,7 @@
 //       ctlPaused            → no new buys (an open position is still managed)
 //       ctlSellReqAt         → emergency sell of the open position, then pause
 //       ctlCbResetReqAt      → clear a tripped circuit breaker
+//       ctlUnhaltReqAt       → clear a slippage halt (after you've checked the trade)
 // The dashboard never touches the bot process or the wallet key — the bot carries
 // out every command itself, with its normal safety checks (lock, slippage, retries).
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,13 +26,13 @@ async function heartbeat(engine, feed) {
     hbAt: new Date(), hbStopped: false, hbPid: process.pid, hbVersion: pkg.version,
     hbMode: cfg.SIM_MODE ? 'sim' : 'live', hbChain: cfg.CHAIN_NAME, hbExitMode: cfg.EXIT_MODE,
     hbPrice: feed.lastPrice || null, hbStale: feed.isStale(), hbLine: engine.statusLine || null,
-    hbLastError: engine.lastError || null,
+    hbLastError: engine.lastError || null, hbHalted: !!engine.halted,
   } });
 }
 
 async function poll(engine, feed) {
   const d = await BotState.findOne({ key: key() },
-    { ctlPaused: 1, ctlSellReqAt: 1, ctlSellDoneAt: 1, ctlCbResetReqAt: 1, ctlCbResetDoneAt: 1 }).lean();
+    { ctlPaused: 1, ctlSellReqAt: 1, ctlSellDoneAt: 1, ctlCbResetReqAt: 1, ctlCbResetDoneAt: 1, ctlUnhaltReqAt: 1, ctlUnhaltDoneAt: 1 }).lean();
   if (!d) return;
   if (!!d.ctlPaused !== paused) console.log(d.ctlPaused ? '⏸  [control] PAUSED from the dashboard — no new buys' : '▶️  [control] RESUMED from the dashboard');
   paused = !!d.ctlPaused;
@@ -41,6 +42,13 @@ async function poll(engine, feed) {
     await state.saveAfterTrade(engine.state);
     await BotState.updateOne({ key: key() }, { $set: { ctlCbResetDoneAt: new Date() } });
     console.log('✅ [control] circuit breaker reset from the dashboard');
+  }
+
+  if (isNewer(d.ctlUnhaltReqAt, d.ctlUnhaltDoneAt)) {
+    engine.halted = false;
+    if (engine.state) engine.state.slippageHalt = false;
+    await BotState.updateOne({ key: key() }, { $set: { ctlUnhaltDoneAt: new Date(), hbHalted: false } });
+    console.log('✅ [control] slippage halt cleared from the dashboard — engine processing prices again');
   }
 
   if (isNewer(d.ctlSellReqAt, d.ctlSellDoneAt)) {

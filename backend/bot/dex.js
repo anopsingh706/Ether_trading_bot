@@ -43,6 +43,7 @@ const ERC20_ABI = [
 ];
 
 const SCAN = cfg.SCAN_TX_URL;
+const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
 class Dex {
   constructor() {
@@ -95,6 +96,22 @@ class Dex {
     } catch { return 0; }
   }
 
+  // Sum the ERC-20 Transfer events in a receipt: tokenIn leaving our wallet, tokenOut
+  // arriving in it. Returns bigints, or null when no matching transfer is found.
+  _walletFlows(receipt, tokenIn, tokenOut) {
+    const me = this.wallet.address.toLowerCase();
+    let amountIn = 0n, amountOut = 0n;
+    for (const log of receipt.logs || []) {
+      if (log.topics[0] !== TRANSFER_TOPIC || log.topics.length < 3) continue;
+      const from = ('0x' + log.topics[1].slice(26)).toLowerCase();
+      const to = ('0x' + log.topics[2].slice(26)).toLowerCase();
+      const token = log.address.toLowerCase();
+      if (token === tokenIn.toLowerCase() && from === me) amountIn += BigInt(log.data);
+      if (token === tokenOut.toLowerCase() && to === me) amountOut += BigInt(log.data);
+    }
+    return { amountIn: amountIn > 0n ? amountIn : null, amountOut: amountOut > 0n ? amountOut : null };
+  }
+
   // side: 'BUY' (USDC.e→WETH) | 'SELL' (WETH→USDC.e). amountIn = bigint in tokenIn units.
   // slippageTolerance: fraction (0.0015 = 0.15%); caller may widen it in fast markets.
   async swap(side, amountIn, slippageTolerance = cfg.SLIPPAGE_TOLERANCE) {
@@ -129,7 +146,10 @@ class Dex {
     const gas = await this._gasUSD(receipt, await nativePriceUSD());
     const ok = receipt.status === 1;
     logger.line(`   ${ok ? '✅ confirmed' : '❌ reverted'} in block ${receipt.blockNumber} | gas ~$${gas}`);
-    return { success: ok, txHash: tx.hash, gasCostUSD: gas };
+    // EXACT amounts from this swap's own Transfer events — not a balance re-read, which a
+    // node one block behind answers with the PRE-swap balance (the 2026-11-01 "−$72" bug).
+    const flows = ok ? this._walletFlows(receipt, tokenIn, tokenOut) : { amountIn: null, amountOut: null };
+    return { success: ok, txHash: tx.hash, gasCostUSD: gas, amountIn: flows.amountIn, amountOut: flows.amountOut };
   }
 }
 
