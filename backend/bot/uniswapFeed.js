@@ -1,19 +1,25 @@
 // bot/uniswapFeed.js
 // ─────────────────────────────────────────────────────────────────────────────
-// Real-time price from the SAME Uniswap v3 pool we will trade against (Polygon).
-// Uniswap has no native price websocket, so:
-//   • PRIMARY (websocket):  connect to a Polygon node over WSS and read the pool's
-//     slot0 price on every new block (~2s push) — true real-time, on-chain price.
-//   • BASELINE (reliable):  also poll slot0 over HTTPS every BLOCK_POLL_MS so the
-//     feed never gets stuck if the websocket drops (same resilience as the Binance feed).
+// Real-time price from the SAME v3 pool we will trade against (Uniswap / PancakeSwap).
+// A DEX can't push to us, but the pool emits a Swap event (carrying the NEW
+// sqrtPriceX96) on every trade — the only thing that moves the price. So:
+//   • PRIMARY (websocket):  eth_subscribe to the pool's Swap logs (free public node,
+//     cfg.RPC_WSS) and take the price straight from each event — zero RPC reads.
+//     Events are coalesced to ≤1 tick per SWAP_MIN_EMIT_MS (latest price wins).
+//     Reconnects with backoff on close/error, or after WSS_SILENT_MS without events.
+//   • SAFETY NET (HTTPS):  read slot0 every BLOCK_POLL_MS through the failover RPC
+//     list (bot/rpc.js) — skipped while Swap events are flowing, so it costs
+//     nothing normally and keeps the feed alive if the websocket drops.
 // Emits the SAME interface as priceFeed.js: 'tick' {price, ts, source}, plus
 // lastPrice / lastTickTs / tickCount / isStale() / start() / stop().
 // ─────────────────────────────────────────────────────────────────────────────
 const EventEmitter = require('events');
+const WebSocket = require('ws');
 const { ethers } = require('ethers');
 const axios = require('axios');
 const cfg = require('./config');
 const logger = require('./logger');
+const rpc = require('./rpc');
 
 const FACTORY_ABI = ['function getPool(address,address,uint24) view returns (address)'];
 const POOL_ABI = [
@@ -26,8 +32,15 @@ const POOL_ABI = [
 class UniswapFeed extends EventEmitter {
   constructor() {
     super();
-    this.http = new ethers.JsonRpcProvider(cfg.RPC_HTTP, cfg.CHAIN_ID, { staticNetwork: true });
-    this.wsProvider = null;
+    this.http = rpc.provider({ log: (...a) => logger.line(...a) });
+    this.ws = null;
+    this._wsDelay = 1000;       // reconnect backoff
+    this._wsOpenedAt = 0;
+    this._lastSwapAt = 0;       // last Swap event received (liveness of the websocket)
+    this._lastSwap = null;      // {blk, idx} of the newest event applied (ignores out-of-order logs)
+    this._pendingPrice = null;  // coalesced price waiting to be emitted
+    this._emitTimer = null;
+    this._silenceTimer = null;
     this.pool = null;
     this.poolFee = null;
     this.wethIsToken0 = false;
@@ -81,16 +94,24 @@ class UniswapFeed extends EventEmitter {
     this._lastReadAt = now;
     try {
       const s = await this.pool.slot0();
-      const price = this._priceFromSqrt(s.sqrtPriceX96);
-      if (price > 0 && isFinite(price)) {
-        this.lastPrice = price;
-        this.lastTickTs = Date.now();
-        this.tickCount++;
-        this.emit('tick', { price, ts: this.lastTickTs, source });
-      }
+      this._emitPrice(this._priceFromSqrt(s.sqrtPriceX96), source);
     } catch (e) {
       // swallow — staleness watchdog in the engine pauses trading if reads keep failing
     }
+  }
+
+  _emitPrice(price, source) {
+    if (!(price > 0 && isFinite(price))) return;
+    this.lastPrice = price;
+    this.lastTickTs = Date.now();
+    this.tickCount++;
+    this.emit('tick', { price, ts: this.lastTickTs, source });
+  }
+
+  // Safety-net poll: only reads the pool when Swap events have NOT kept the price fresh.
+  _poll() {
+    if (Date.now() - this._lastSwapAt < cfg.BLOCK_POLL_MS) return;
+    this._readPrice('poll');
   }
 
   async start() {
@@ -106,28 +127,97 @@ class UniswapFeed extends EventEmitter {
       console.log(`🔎 [pool] sanity: ${cfg.DEX_NAME} ${this.lastPrice ? this.lastPrice.toFixed(2) : '—'} vs Binance ${bp ? bp.toFixed(2) : '—'} (${diff != null ? diff.toFixed(3) : '—'}% diff)`);
     } catch (_) {}
 
-    // BASELINE: reliable HTTPS polling so the feed can never get stuck.
-    this.pollTimer = setInterval(() => this._readPrice('poll'), cfg.BLOCK_POLL_MS);
+    // SAFETY NET: HTTPS polling (failover RPC list) so the feed can never get stuck.
+    this.pollTimer = setInterval(() => this._poll(), cfg.BLOCK_POLL_MS);
 
-    // PRIMARY: websocket block subscription for real-time updates (best-effort).
-    if (cfg.USE_WSS && cfg.RPC_WSS) this._connectWs();
+    // PRIMARY: Swap-event websocket for real-time updates (best-effort).
+    if (cfg.USE_WSS && cfg.RPC_WSS && cfg.SWAP_TOPIC) {
+      this._connectWs();
+      this._silenceTimer = setInterval(() => this._checkSilence(), Math.min(cfg.WSS_SILENT_MS, 30000));
+    }
   }
 
   _connectWs() {
-    try {
-      this.wsProvider = new ethers.WebSocketProvider(cfg.RPC_WSS);
-      this.wsProvider.on('block', () => this._readPrice('block'));
-      this.wsProvider.on('error', (e) => logger.line(`⚠️ [${cfg.DEX_NAME} ${cfg.CHAIN_NAME} ws] error (polling continues):`, e.message));
-      console.log(`🔌 [${cfg.DEX_NAME} ${cfg.CHAIN_NAME}] websocket block subscription active (real-time)`);
-    } catch (e) {
-      console.warn(`⚠️ [${cfg.DEX_NAME} ${cfg.CHAIN_NAME}] websocket unavailable, using polling only:`, e.message);
-    }
+    if (this.stopped) return;
+    const tag = `[${cfg.DEX_NAME} ${cfg.CHAIN_NAME} ws]`;
+    const ws = new WebSocket(cfg.RPC_WSS, { handshakeTimeout: 15000 });
+    this.ws = ws;
+    this._wsOpenedAt = 0;
+
+    ws.on('open', () => {
+      this._wsOpenedAt = Date.now();
+      ws.send(JSON.stringify({
+        jsonrpc: '2.0', id: 1, method: 'eth_subscribe',
+        params: ['logs', { address: this.pool.target, topics: [cfg.SWAP_TOPIC] }],
+      }));
+    });
+
+    ws.on('message', (raw) => {
+      let m;
+      try { m = JSON.parse(raw); } catch { return; }
+      if (m.id === 1) {
+        if (m.error) { logger.line(`⚠️ ${tag} subscribe refused: ${m.error.message} — polling only until reconnect`); ws.terminate(); return; }
+        this._wsDelay = 1000;
+        this._lastSwapAt = Date.now(); // count the subscription itself as alive
+        logger.line(`🔌 ${tag} Swap-event subscription active (${rpc.label(cfg.RPC_WSS)}) — price pushed on every trade`);
+        return;
+      }
+      const log = m.params && m.params.result;
+      if (log && log.data) this._onSwapLog(log);
+    });
+
+    ws.on('close', () => {
+      if (this.ws !== ws) return;    // an older socket we already replaced
+      this.ws = null;
+      if (this.stopped) return;
+      logger.line(`⚠️ ${tag} closed — polling continues, reconnecting in ${Math.round(this._wsDelay / 1000)}s`);
+      setTimeout(() => this._connectWs(), this._wsDelay);
+      this._wsDelay = Math.min(this._wsDelay * 2, 60000);
+    });
+
+    ws.on('error', (e) => {
+      logger.line(`⚠️ ${tag} error: ${e.message}`);
+      try { ws.terminate(); } catch (_) {}
+    });
+  }
+
+  _onSwapLog(log) {
+    if (log.removed || !log.topics || log.topics[0] !== cfg.SWAP_TOPIC) return;
+    // ignore events older than one already applied (logs can arrive slightly out of order)
+    const blk = parseInt(log.blockNumber, 16), idx = parseInt(log.logIndex, 16);
+    if (this._lastSwap && (blk < this._lastSwap.blk || (blk === this._lastSwap.blk && idx <= this._lastSwap.idx))) return;
+    this._lastSwap = { blk, idx };
+    this._lastSwapAt = Date.now();
+
+    // data words: amount0, amount1, sqrtPriceX96, liquidity, tick, … → sqrtPriceX96 is word #2
+    this._pendingPrice = this._priceFromSqrt(BigInt('0x' + log.data.slice(2 + 64 * 2, 2 + 64 * 3)));
+
+    // coalesce bursts: emit now if the last tick is old enough, else when the window ends
+    if (this._emitTimer) return;
+    const wait = Math.max(0, cfg.SWAP_MIN_EMIT_MS - (Date.now() - this.lastTickTs));
+    this._emitTimer = setTimeout(() => {
+      this._emitTimer = null;
+      if (this.stopped || this._pendingPrice == null) return;
+      const p = this._pendingPrice;
+      this._pendingPrice = null;
+      this._emitPrice(p, 'swap');
+    }, wait);
+  }
+
+  // A socket can stay "open" but stop delivering (silent drop) → force a reconnect.
+  _checkSilence() {
+    if (this.stopped || !this.ws || !this._wsOpenedAt) return;
+    if (Date.now() - Math.max(this._lastSwapAt, this._wsOpenedAt) < cfg.WSS_SILENT_MS) return;
+    logger.line(`⚠️ [${cfg.DEX_NAME} ${cfg.CHAIN_NAME} ws] no Swap events for ${Math.round(cfg.WSS_SILENT_MS / 1000)}s — reconnecting`);
+    try { this.ws.terminate(); } catch (_) {}
   }
 
   stop() {
     this.stopped = true;
     if (this.pollTimer) clearInterval(this.pollTimer);
-    if (this.wsProvider) { try { this.wsProvider.destroy(); } catch (_) {} }
+    if (this._silenceTimer) clearInterval(this._silenceTimer);
+    if (this._emitTimer) clearTimeout(this._emitTimer);
+    if (this.ws) { try { this.ws.terminate(); } catch (_) {} }
   }
 }
 

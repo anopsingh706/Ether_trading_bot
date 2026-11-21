@@ -27,6 +27,7 @@ const BotState = require('../bot/models/BotState');
 const BotOrder = require('../bot/models/BotOrder');
 const { STATE_KEY } = require('../bot/state');
 const circuitBreaker = require('../bot/circuitBreaker');
+const rpc = require('../bot/rpc');
 const { verifyPassword } = require('./passwords');
 
 const PORT = Number(process.env.DASH_PORT || 8080);
@@ -112,7 +113,7 @@ async function wallet(price) {
   if (cfg.SIM_MODE || !cfg.ADMIN_WALLET) return null;
   if (Date.now() - walletCache.at < 30000) return walletCache.v;
   try {
-    const p = new ethers.JsonRpcProvider(cfg.RPC_HTTP, cfg.CHAIN_ID, { staticNetwork: true });
+    const p = rpc.provider();
     const erc = ['function balanceOf(address) view returns (uint256)'];
     const [u, w, n] = await Promise.all([
       new ethers.Contract(cfg.USDC_ADDRESS, erc, p).balanceOf(cfg.ADMIN_WALLET),

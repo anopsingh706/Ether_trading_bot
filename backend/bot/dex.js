@@ -12,6 +12,7 @@ const { ethers } = require('ethers');
 const axios = require('axios');
 const cfg = require('./config');
 const logger = require('./logger');
+const rpc = require('./rpc');
 
 // Live native-gas-token/USD (POL on Polygon, ETH on Base) for accurate gas costing
 // (cached 10 min; falls back to config).
@@ -47,7 +48,7 @@ const TRANSFER_TOPIC = ethers.id('Transfer(address,address,uint256)');
 
 class Dex {
   constructor() {
-    this.provider = new ethers.JsonRpcProvider(cfg.RPC_HTTP, cfg.CHAIN_ID, { staticNetwork: true });
+    this.provider = rpc.provider({ log: (...a) => logger.line(...a) }); // failover list — trades survive a node outage
     const pk = (process.env.PRIVATE_KEY || '').trim();
     this.wallet = new ethers.Wallet(pk.startsWith('0x') ? pk : '0x' + pk, this.provider);
     this.router = new ethers.Contract(cfg.UNISWAP_ROUTER, ROUTER_ABI, this.wallet);

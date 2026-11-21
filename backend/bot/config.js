@@ -14,6 +14,8 @@ require('dotenv').config();
 const num = (v, d) => (v !== undefined && v !== '' && !isNaN(Number(v)) ? Number(v) : d);
 const bool = (v, d) => (v === undefined || v === '' ? d : String(v).toLowerCase() === 'true');
 const trim = (v) => (typeof v === 'string' ? v.trim() : v);
+// comma-separated env list, else the default list
+const list = (v, d) => { const a = String(v || '').split(',').map((x) => x.trim()).filter(Boolean); return a.length ? a : d; };
 
 // Derive a sandbox DB URL from the production DB_URL by replacing the db name.
 // e.g.  mongodb+srv://.../jan25au_prod   →   mongodb+srv://.../jan25au_botsim
@@ -32,7 +34,8 @@ const CHAIN = (trim(process.env.BOT_CHAIN) || 'polygon').toLowerCase();
 const CHAINS = {
   polygon: {
     chainId: 137, name: 'Polygon', dex: 'Uniswap v3',
-    rpc: trim(process.env.POLYGON_RPC_URL), wss: trim(process.env.POLYGON_WSS_URL),
+    rpcs: [trim(process.env.POLYGON_RPC_URL)], wss: trim(process.env.POLYGON_WSS_URL),
+    swapTopic: '0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67', // UniswapV3Pool Swap (7 fields)
     // Polygon keeps reading the legacy env names so existing .env files work unchanged.
     weth: trim(process.env.WETH_TOKEN_ADDRESS), usdc: trim(process.env.USDT_TOKEN_ADDRESS), usdcSymbol: 'USDC.e',
     poolFee: num(process.env.BOT_POOL_FEE, 500),
@@ -44,7 +47,16 @@ const CHAINS = {
   },
   base: {
     chainId: 8453, name: 'Base', dex: 'PancakeSwap v3',
-    rpc: trim(process.env.BASE_RPC_URL) || 'https://mainnet.base.org', wss: trim(process.env.BASE_WSS_URL),
+    // RPC failover list, in priority order. BASE_RPC_URLS overrides the two free
+    // public nodes; BASE_RPC_URL (e.g. an Alchemy key) is the LAST-RESORT backup —
+    // only used when both public nodes fail, so it stays far inside a free quota.
+    rpcs: [...list(process.env.BASE_RPC_URLS, ['https://mainnet.base.org', 'https://base-rpc.publicnode.com']), trim(process.env.BASE_RPC_URL)],
+    // Swap-event websocket (free, public). Don't point this at Alchemy: the pool
+    // emits ~2 Swap events/s and every pushed event costs quota there.
+    wss: trim(process.env.BASE_WSS_URL) || 'wss://base-rpc.publicnode.com',
+    // PancakeV3Pool Swap(sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick,
+    // protocolFeesToken0, protocolFeesToken1) — verified live on the pool 2026-11-21
+    swapTopic: '0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83',
     weth: '0x4200000000000000000000000000000000000006', usdc: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', usdcSymbol: 'USDC',
     poolFee: num(process.env.BOT_BASE_POOL_FEE, 100),                       // 0.01% tier (~$4.5M TVL)
     factory: '0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865',                  // PancakeV3Factory
@@ -58,6 +70,8 @@ const CHAINS = {
 };
 if (!CHAINS[CHAIN]) throw new Error(`BOT_CHAIN="${CHAIN}" is not valid — use polygon | base`);
 const C = CHAINS[CHAIN];
+C.rpcs = [...new Set(C.rpcs.filter(Boolean))];   // drop unset / duplicate entries, keep priority order
+C.rpc = C.rpcs[0];
 
 // WSS endpoint: explicit env, else derived from an Infura/Alchemy HTTPS url
 // (Infura: https://…/v3/KEY → wss://…/ws/v3/KEY; Alchemy: same path over wss). Public RPCs → none.
@@ -283,9 +297,15 @@ module.exports = {
   // ── Price source & DEX (per BOT_CHAIN) ───────────────────────────────────────
   PRICE_SOURCE: (process.env.BOT_PRICE_SOURCE || 'uniswap'),   // 'uniswap' (= the chain's DEX pool) | 'binance'
   RPC_HTTP: C.rpc,
+  RPC_HTTP_LIST: C.rpcs,                                       // failover order (bot/rpc.js)
+  RPC_TIMEOUT_MS:  num(process.env.BOT_RPC_TIMEOUT_MS, 7000),  // per-node request timeout before failing over
+  RPC_COOLDOWN_MS: num(process.env.BOT_RPC_COOLDOWN_MS, 30000), // skip a failed node this long
   RPC_WSS:  deriveWss(),                                       // websocket node connection (best-effort)
-  USE_WSS:  bool(process.env.BOT_USE_WSS, true),               // subscribe to new blocks over WSS
-  BLOCK_POLL_MS:    num(process.env.BOT_BLOCK_POLL_MS, 2500),     // reliable polling baseline (ms)
+  USE_WSS:  bool(process.env.BOT_USE_WSS, true),               // subscribe to the pool's Swap events over WSS
+  SWAP_TOPIC: C.swapTopic,
+  SWAP_MIN_EMIT_MS: num(process.env.BOT_SWAP_MIN_EMIT_MS, 1000), // coalesce Swap events → ≤1 tick/s (latest price)
+  WSS_SILENT_MS:    num(process.env.BOT_WSS_SILENT_MS, 90000),   // no Swap for this long → reconnect the websocket
+  BLOCK_POLL_MS:    num(process.env.BOT_BLOCK_POLL_MS, 5000),     // safety-net HTTPS poll (skipped while Swap events flow)
   FEED_MIN_READ_MS: num(process.env.BOT_FEED_MIN_READ_MS, 4000),  // hard cap on pool-read rate → cuts Infura RPC load
   POOL_FEE: C.poolFee,                                         // Polygon 500 (0.05%) | Base 100 (0.01%)
   UNISWAP_V3_FACTORY: C.factory,                               // (names kept: both DEXes are Uniswap-v3-style)

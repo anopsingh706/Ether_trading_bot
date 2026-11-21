@@ -41,7 +41,7 @@ const SWAP_TX_BYTES = 300; // a signed exactInputSingle tx is ~250-300 bytes
 let _ctx = null;
 function ctx() {
   if (_ctx) return _ctx;
-  const provider = new ethers.JsonRpcProvider(cfg.RPC_HTTP, cfg.CHAIN_ID, { staticNetwork: true });
+  const provider = require('./rpc').provider();
   const quoter = new ethers.Contract(cfg.UNISWAP_QUOTER, QUOTER_ABI, provider);
   const l1Oracle = cfg.L1_FEE_ORACLE ? new ethers.Contract(cfg.L1_FEE_ORACLE, L1_ORACLE_ABI, provider) : null;
   _ctx = { provider, quoter, l1Oracle };

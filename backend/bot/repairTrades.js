@@ -27,7 +27,7 @@ const f = (n, d = 2) => (n == null ? '—' : Number(n).toFixed(d));
 (async () => {
   if (cfg.SIM_MODE) { console.log('This repairs LIVE records only (BOT_SIM is set).'); process.exit(1); }
   await botConn.asPromise();
-  const provider = new ethers.JsonRpcProvider(cfg.RPC_HTTP, cfg.CHAIN_ID, { staticNetwork: true });
+  const provider = require('./rpc').provider();
   const me = cfg.ADMIN_WALLET.toLowerCase(), USDC = cfg.USDC_ADDRESS.toLowerCase(), WETH = cfg.WETH_ADDRESS.toLowerCase();
   const orders = await BotOrder.find({ dry_run: { $ne: true } }).sort({ createdAt: 1 }).lean();
   console.log(`${orders.length} live orders in ${BotOrder.collection.collectionName} (${cfg.CHAIN_NAME}) — ${APPLY ? 'APPLYING corrections' : 'dry run (add --apply to write)'}\n`);

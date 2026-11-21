@@ -40,7 +40,7 @@ const chain = chainLine.split('=')[1].split('#')[0].trim().toLowerCase() || 'pol
 // settings that belong only to the OTHER chain are dropped too (e.g. the Polygon RPC key on a Base server)
 const OTHER_CHAIN = {
   base:    ['POLYGON_RPC_URL', 'POLYGON_WSS_URL', 'WETH_TOKEN_ADDRESS', 'USDT_TOKEN_ADDRESS', 'BOT_POOL_FEE', 'BOT_POL_PRICE_USD', 'UNISWAP_V3_FACTORY', 'UNISWAP_ROUTER', 'UNISWAP_QUOTER'],
-  polygon: ['BASE_RPC_URL', 'BASE_WSS_URL', 'BOT_BASE_POOL_FEE'],
+  polygon: ['BASE_RPC_URL', 'BASE_RPC_URLS', 'BASE_WSS_URL', 'BOT_BASE_POOL_FEE'],
 }[chain] || [];
 for (const k of OTHER_CHAIN) used.delete(k);
 const kept = [], dropped = [];
@@ -56,7 +56,7 @@ for (const line of srcLines) {
 // 3) refuse to write a file the bot can't run with
 const need = ['PRIVATE_KEY', 'ADMIN_WALLET_ADDRESS'];
 if (!kept.includes('DB_URL') && !kept.includes('BOT_DB_URL')) need.push('DB_URL or BOT_DB_URL');
-if (chain === 'base' && !kept.includes('BASE_RPC_URL')) console.warn('⚠️  BOT_CHAIN=base but no BASE_RPC_URL — the bot will use the public https://mainnet.base.org');
+if (chain === 'base' && !kept.includes('BASE_RPC_URL')) console.log('ℹ️  BOT_CHAIN=base with no BASE_RPC_URL — the bot uses the free public nodes only (no paid/keyed last-resort backup)');
 const missing = need.filter((k) => !k.includes(' or ') && !kept.includes(k)).concat(need.filter((k) => k.includes(' or ')));
 if (missing.length) { console.error('Missing required variables: ' + missing.join(', ')); process.exit(1); }
 

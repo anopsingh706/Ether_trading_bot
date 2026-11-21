@@ -14,6 +14,7 @@ const VolumeFeed = require('./volumeFeed');
 const BotTick = require('./models/BotTick');
 const logger = require('./logger');
 const control = require('./control');
+const rpc = require('./rpc');
 
 let _lastTickLog = 0;
 
@@ -56,7 +57,8 @@ async function main() {
   console.log(`   dashboard : heartbeat + remote controls via DB (pause / resume / emergency sell / reset breaker)`);
   console.log(`   rsi filt  : ${cfg.RSI_FILTER ? 'ON — buy only if RSI ≤ ' + cfg.RSI_MAX_ENTRY + ' (period ' + cfg.RSI_PERIOD + ', confirms a real oversold dip)' : 'off'}`);
   console.log(`   db        : ${botConn.name}`);
-  console.log(`   chain     : ${cfg.CHAIN_NAME} — ${cfg.DEX_NAME} WETH/${cfg.USDC_SYMBOL} fee ${cfg.POOL_FEE} (${cfg.POOL_FEE / 1e4}%) | gas in ${cfg.NATIVE_SYMBOL}${cfg.L1_FEE_ORACLE ? ' + L1 data fee' : ''} | rpc ${/infura|alchemy/.test(cfg.RPC_HTTP || '') ? 'private' : (cfg.RPC_HTTP || '—')}`);
+  console.log(`   chain     : ${cfg.CHAIN_NAME} — ${cfg.DEX_NAME} WETH/${cfg.USDC_SYMBOL} fee ${cfg.POOL_FEE} (${cfg.POOL_FEE / 1e4}%) | gas in ${cfg.NATIVE_SYMBOL}${cfg.L1_FEE_ORACLE ? ' + L1 data fee' : ''} `);
+  console.log(`   rpc       : ${cfg.RPC_HTTP_LIST.map(rpc.label).join(' → ') || '—'} (failover) | price push: ${cfg.USE_WSS && cfg.RPC_WSS ? 'Swap events via ' + rpc.label(cfg.RPC_WSS) : 'off (polling only)'}`);
   console.log(`   price src : ${cfg.PRICE_SOURCE === 'uniswap' ? `${cfg.DEX_NAME} pool (${cfg.CHAIN_NAME}, on-chain)` : 'Binance ' + cfg.WS_SYMBOL}`);
   console.log('────────────────────────────────────────────────────────────');
 

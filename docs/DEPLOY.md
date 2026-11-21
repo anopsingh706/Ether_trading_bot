@@ -134,6 +134,9 @@ server, `npm run cb:reset && pm2 restart eather-bot`).
 - [ ] `.env` is `chmod 600`, owned by `eather`, never committed.
 - [ ] The wallet holds **only trading funds** — the key lives on the server.
 - [ ] Atlas: droplet IP allow-listed; dedicated DB user limited to `jan25au_botsim`.
-- [ ] Private RPC (e.g. Alchemy with Base enabled) instead of the public `mainnet.base.org`.
+- [ ] RPC: the bot fails over `mainnet.base.org` → `base-rpc.publicnode.com` → `BASE_RPC_URL` (optional keyed backup, e.g. Alchemy, HTTP only).
+      Price comes from the pool's Swap events over the free `wss://base-rpc.publicnode.com`.
+      Never point `BASE_WSS_URL` at Alchemy and never set `BOT_FEED_MIN_READ_MS` ≈ the block time —
+      per-block reads used up the Alchemy free monthly quota in Nov 2026 (bot sat stale ~6 days).
 - [ ] Never run `npm run bot` on your PC while the droplet bot is running.
 - [ ] If the droplet is ever compromised: move funds to a new wallet first, then rotate the DB password and RPC key.
